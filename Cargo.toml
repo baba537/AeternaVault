@@ -1,0 +1,86 @@
+[package]
+name = "aeterna-vault"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A calm, careful backup tool for Windows. Your data, kept for eternity."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baba537/AeternaVault"
+readme = "README.md"
+keywords = ["backup", "restore", "windows", "archive", "egui"]
+categories = ["filesystem", "gui"]
+publish = false
+build = "build.rs"
+
+# The executable is called `AeternaVault.exe`, while the crate keeps the
+# conventional kebab-case name.
+[[bin]]
+name = "AeternaVault"
+path = "src/main.rs"
+
+[features]
+# Exactly one renderer should be enabled.
+#
+# `wgpu` is the default: on Windows it renders through Direct3D 12 and falls
+# back to a software adapter, so the app also starts in virtual machines and
+# remote sessions without a proper OpenGL driver.
+#
+# `glow` (OpenGL) gives a noticeably smaller executable and faster builds:
+#   cargo build --release --no-default-features --features glow
+default = ["wgpu"]
+wgpu = ["eframe/wgpu"]
+glow = ["eframe/glow"]
+
+[dependencies]
+# GUI: immediate-mode, small, easy to theme. See docs/ARCHITECTURE.md for alternatives.
+eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts"] }
+# Native Windows file/folder dialogs.
+rfd = { version = "0.17.2", default-features = false }
+
+# Configuration and backup index.
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1.6"
+directories = "6.0.0"
+
+# Logging.
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+tracing-appender = "0.2.5"
+
+# Errors.
+thiserror = "2.0.20"
+anyhow = "1.0.104"
+
+# Backup engine.
+walkdir = "2.5.0"
+globset = "0.4.20"
+sha2 = "0.11.0"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
+
+# Command line for scheduled / unattended runs.
+clap = { version = "4.6.6", features = ["derive"] }
+sys-locale = "0.3.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_WindowsProgramming",
+] }
+winreg = "0.56.0"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.31"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+# Panics are intentionally *not* set to abort: a panic inside a background
+# worker is caught by the GUI and reported instead of closing the window.

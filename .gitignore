@@ -1,0 +1,20 @@
+# Rust build output
+/target/
+**/*.rs.bk
+*.pdb
+
+# Release packaging (created by the release workflow or locally)
+/dist/
+
+# Local configuration and logs when testing portable mode
+/AeternaVault.toml
+/logs/
+*.invalid.toml
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,105 @@
+name: Release
+
+# Push a tag such as `v0.1.0` to build and publish a GitHub release:
+#   git tag v0.1.0
+#   git push origin v0.1.0
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build and publish AeternaVault.exe
+    runs-on: windows-latest
+    env:
+      # Optional code signing. Leave these secrets unset to publish unsigned builds.
+      #   WINDOWS_SIGNING_CERT_BASE64  base64-encoded .pfx file
+      #   WINDOWS_SIGNING_CERT_PASSWORD
+      SIGNING_CERT: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+      SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check that the tag matches Cargo.toml
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          if ($tag -ne "v$version") { throw "Tag $tag does not match the version $version in Cargo.toml" }
+
+      - name: Tests
+        run: cargo test --locked
+
+      # The static CRT is configured in .cargo/config.toml, so the executable
+      # runs without the Visual C++ Redistributable.
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Sign executable (optional)
+        if: env.SIGNING_CERT != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'signing.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_CERT))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          & $signtool.FullName sign /f $pfx /p $env:SIGNING_PASSWORD /fd SHA256 `
+            /tr http://timestamp.digicert.com /td SHA256 target\release\AeternaVault.exe
+          if ($LASTEXITCODE -ne 0) { throw "signing failed" }
+          Remove-Item $pfx
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target\release\AeternaVault.exe dist\AeternaVault.exe
+
+          $package = "AeternaVault-$tag-windows-x64"
+          $staging = Join-Path $env:RUNNER_TEMP $package
+          New-Item -ItemType Directory $staging | Out-Null
+          Copy-Item target\release\AeternaVault.exe, README.md, CHANGELOG.md, LICENSE-MIT, LICENSE-APACHE $staging
+          Compress-Archive -Path "$staging\*" -DestinationPath "dist\$package.zip"
+
+          Get-ChildItem dist -File | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content dist\SHA256SUMS.txt -Encoding ascii
+          Get-Content dist\SHA256SUMS.txt
+
+      - name: Release notes from CHANGELOG.md
+        shell: pwsh
+        run: |
+          $version = '${{ github.ref_name }}'.TrimStart('v')
+          $lines = Get-Content CHANGELOG.md
+          $start = ($lines | Select-String -Pattern "^## \[$([regex]::Escape($version))\]" | Select-Object -First 1).LineNumber
+          if (-not $start) { $notes = "AeternaVault $version" }
+          else {
+            $rest = $lines[$start..($lines.Length - 1)]
+            $end = ($rest | Select-String -Pattern '^## \[' | Select-Object -First 1).LineNumber
+            $notes = if ($end) { $rest[0..($end - 2)] } else { $rest }
+          }
+          $notes += ''
+          $notes += '**Verify the download** (PowerShell): `Get-FileHash .\AeternaVault.exe -Algorithm SHA256` and compare with `SHA256SUMS.txt`.'
+          $notes | Set-Content release-notes.md -Encoding utf8
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          gh release create $tag (Get-ChildItem dist -File).FullName `
+            --title "AeternaVault $tag" --notes-file release-notes.md --verify-tag
