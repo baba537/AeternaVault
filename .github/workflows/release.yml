@@ -24,7 +24,7 @@ jobs:
       SIGNING_CERT: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
       SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         run: |
