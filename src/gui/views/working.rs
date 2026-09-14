@@ -183,6 +183,9 @@ pub fn show_done(app: &mut AeternaApp, ui: &mut Ui) {
                         report.skipped,
                         report.duration,
                     ));
+                    if report.registry_keys > 0 {
+                        widgets::secondary_text(ui, lang.registry_applied(report.registry_keys));
+                    }
                     if report.failed > 0 {
                         ui.label(
                             egui::RichText::new(lang.failed_files(report.failed)).color(p.warning),

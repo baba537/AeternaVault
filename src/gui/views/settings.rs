@@ -66,6 +66,64 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
     ui.add_space(14.0);
 
     widgets::card(ui, |ui| {
+        let p = *theme::palette(ui);
+        widgets::section_title(ui, t.enc_settings_title);
+        if app.config.encryption.enabled {
+            widgets::strong_text(ui, t.enc_status_on);
+        } else {
+            widgets::secondary_text(ui, t.enc_status_off);
+        }
+        if app.vault.header.is_some() {
+            ui.add_space(6.0);
+            let mut remembered = app.vault.remembered;
+            if ui
+                .checkbox(&mut remembered, t.remember_on_computer)
+                .changed()
+            {
+                app.set_remembered(remembered);
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if widgets::button(
+                    ui,
+                    ButtonKind::Secondary,
+                    t.change_passphrase,
+                    !app.is_busy(),
+                )
+                .clicked()
+                {
+                    if app.vault.key.is_some() {
+                        app.vault.dialog = Some(crate::gui::VaultDialog::Change {
+                            passphrase: String::new(),
+                            repeat: String::new(),
+                            error: None,
+                        });
+                    } else {
+                        app.open_unlock(crate::gui::AfterUnlock::ChangePassphrase);
+                    }
+                }
+                if app.vault.key.is_some()
+                    && !app.vault.remembered
+                    && widgets::button(ui, ButtonKind::Quiet, t.lock_now, true).clicked()
+                {
+                    app.lock_vault(&ctx);
+                }
+            });
+            ui.label(
+                egui::RichText::new(
+                    crate::engine::vault::vault_dir(&app.config.destination)
+                        .display()
+                        .to_string(),
+                )
+                .size(12.5)
+                .color(p.text_secondary),
+            );
+        }
+    });
+
+    ui.add_space(14.0);
+
+    widgets::card(ui, |ui| {
         widgets::section_title(ui, t.exclusions_title);
         widgets::secondary_text(ui, t.exclusions_hint);
         ui.add_space(6.0);
@@ -117,6 +175,10 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
         ui.checkbox(
             &mut app.config.advanced.verify_on_restore,
             t.verify_checksums,
+        );
+        ui.checkbox(
+            &mut app.config.advanced.save_program_list,
+            t.adv_program_list,
         );
         if before != app.config.advanced {
             app.mark_dirty();

@@ -1,20 +1,23 @@
 //! Executes a confirmed [`RestorePlan`].
 //!
-//! Only files marked `New` or `Changed` in the plan are written. Nothing is
+//! Only items marked `New` or `Changed` in the plan are written. Nothing is
 //! ever deleted at the target.
 
 use std::time::{Duration, Instant};
 
+use super::crypto::VaultKey;
 use super::fsops::{self, CopyError};
-use super::plan::{ItemKind, RestorePlan};
-use super::{CancelToken, Phase, Progress, Reporter, safe_relative_path};
+use super::plan::{ItemKind, RestorePlan, RestoreTarget};
+use super::{CancelToken, Phase, Progress, Reporter, safe_relative_path, vault};
 use crate::config::ConflictPolicy;
-use crate::error::EngineResult;
+use crate::error::{EngineError, EngineResult};
+use crate::platform::registry;
 
 #[derive(Debug, Clone, Default)]
 pub struct RestoreReport {
     pub restored_files: u64,
     pub restored_bytes: u64,
+    pub registry_keys: u64,
     /// Files left untouched: already identical, or skipped by the conflict rule.
     pub skipped: u64,
     pub failed: u64,
@@ -25,11 +28,18 @@ pub struct RestoreReport {
 
 pub fn run_restore(
     plan: &RestorePlan,
+    key: Option<&VaultKey>,
     cancel: &CancelToken,
     on_progress: &mut dyn FnMut(&Progress),
 ) -> EngineResult<RestoreReport> {
     let started = Instant::now();
     let (files_total, bytes_total) = plan.write_totals();
+    let encrypted = plan.snapshot.is_encrypted();
+    if encrypted && key.is_none() {
+        return Err(EngineError::Locked);
+    }
+    let destination = plan.snapshot.destination();
+
     let mut report = RestoreReport {
         skipped: plan.summary.count(ItemKind::Skipped) + plan.summary.count(ItemKind::Unchanged),
         ..RestoreReport::default()
@@ -52,7 +62,7 @@ pub fn run_restore(
     for item in plan
         .items
         .iter()
-        .filter(|i| matches!(i.kind, ItemKind::New | ItemKind::Changed))
+        .filter(|i| !i.registry && matches!(i.kind, ItemKind::New | ItemKind::Changed))
     {
         if cancel.is_cancelled() {
             report.cancelled = true;
@@ -61,11 +71,7 @@ pub fn run_restore(
         let (Some(rel), Some(blob)) = (safe_relative_path(&item.rel), item.blob.as_ref()) else {
             continue;
         };
-        let Some(blob_rel) = safe_relative_path(&blob.blob) else {
-            continue;
-        };
         let target = plan.sources[item.source].root.join(rel);
-        let blob_path = plan.snapshot.computer_dir.join(blob_rel);
         progress.current = target.display().to_string();
 
         // The target may have appeared since the preview; respect "keep existing".
@@ -78,11 +84,34 @@ pub fn run_restore(
             continue;
         }
 
-        let expected = plan.options.verify.then_some(blob.sha256.as_str());
-        let result = fsops::copy_hashed(&blob_path, &target, expected, cancel, &mut |n| {
-            progress.bytes_done += n;
-            reporter.maybe(&progress);
-        });
+        let result = match (key, plan.snapshot.blob_root()) {
+            (Some(key), None) => {
+                let blob_path = vault::blob_path(&destination, &blob.blob);
+                // Decryption authenticates the content; the checksum is compared as well.
+                fsops::decrypt_blob(
+                    key,
+                    &blob_path,
+                    &target,
+                    Some(&blob.sha256),
+                    cancel,
+                    &mut |n| {
+                        progress.bytes_done += n;
+                        reporter.maybe(&progress);
+                    },
+                )
+            }
+            (_, Some(root)) => match safe_relative_path(&blob.blob) {
+                Some(blob_rel) => {
+                    let expected = plan.options.verify.then_some(blob.sha256.as_str());
+                    fsops::copy_hashed(&root.join(blob_rel), &target, expected, cancel, &mut |n| {
+                        progress.bytes_done += n;
+                        reporter.maybe(&progress);
+                    })
+                }
+                None => continue,
+            },
+            (None, None) => return Err(EngineError::Locked),
+        };
 
         match result {
             Ok(_) => {
@@ -109,11 +138,51 @@ pub fn run_restore(
         reporter.maybe(&progress);
     }
 
+    // Registry settings: imported for the original locations, written as `.reg`
+    // files when restoring into a folder.
+    if !report.cancelled {
+        for item in plan
+            .items
+            .iter()
+            .filter(|i| i.registry && matches!(i.kind, ItemKind::New | ItemKind::Changed))
+        {
+            let Some(export) = plan
+                .registry
+                .iter()
+                .find(|e| e.root.eq_ignore_ascii_case(&item.rel))
+            else {
+                continue;
+            };
+            let result = match &plan.options.target {
+                RestoreTarget::Original => registry::import(export).map(|_| ()),
+                RestoreTarget::Folder(_) => {
+                    let name = format!(
+                        "{}.reg",
+                        super::sources::sanitize_segment(&export.root.replace('\\', " - "))
+                    );
+                    fsops::write_utf16_file(
+                        &plan.sources[item.source].root.join(name),
+                        &export.to_reg_text(),
+                    )
+                }
+            };
+            match result {
+                Ok(()) => report.registry_keys += 1,
+                Err(err) => {
+                    tracing::warn!("could not restore {}: {err}", export.root);
+                    report.warnings.push(format!("{}: {err}", export.root));
+                    report.failed += 1;
+                }
+            }
+        }
+    }
+
     progress.phase = Phase::Finishing;
     reporter.now(&progress);
     report.duration = started.elapsed();
     tracing::info!(
         restored = report.restored_files,
+        registry = report.registry_keys,
         failed = report.failed,
         cancelled = report.cancelled,
         "restore finished"

@@ -1,0 +1,167 @@
+//! Turns the configuration (folders + chosen applications) into the concrete
+//! list of things to back up. Read-only.
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+
+use super::manifest::APPS_DIR;
+use super::paths_equal;
+use crate::config::Config;
+use crate::i18n::Lang;
+use crate::platform::apps::Catalog;
+use crate::platform::known_paths::KnownPaths;
+
+#[derive(Debug, Clone)]
+pub struct BackupSource {
+    /// Folder inside the snapshot, `/`-separated.
+    pub key: String,
+    pub name: String,
+    pub root: PathBuf,
+    pub portable: Option<String>,
+    pub app: Option<String>,
+    pub excludes: Vec<String>,
+    pub include_paths: Vec<String>,
+    pub exclude_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RegistrySource {
+    pub app: String,
+    pub app_name: String,
+    pub key: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Sources {
+    pub folders: Vec<BackupSource>,
+    pub registry: Vec<RegistrySource>,
+}
+
+impl Sources {
+    pub fn is_empty(&self) -> bool {
+        self.folders.is_empty() && self.registry.is_empty()
+    }
+
+    pub fn collect(config: &Config, catalog: &Catalog, known: &KnownPaths, lang: Lang) -> Self {
+        let mut sources = Sources::default();
+        let mut used = HashSet::new();
+        // Reserve the applications folder for application data.
+        used.insert(APPS_DIR.to_lowercase());
+
+        for source in config.enabled_sources() {
+            if source.path.as_os_str().is_empty()
+                || sources
+                    .folders
+                    .iter()
+                    .any(|s| paths_equal(&s.root, &source.path))
+            {
+                continue;
+            }
+            sources.folders.push(BackupSource {
+                key: unique_key(&sanitize_segment(&source.display_name()), &mut used),
+                name: source.display_name(),
+                root: source.path.clone(),
+                portable: known.to_portable(&source.path),
+                app: None,
+                excludes: source.exclude.clone(),
+                include_paths: source.include_paths.clone(),
+                exclude_paths: source.exclude_paths.clone(),
+            });
+        }
+
+        for choice in config.apps.iter().filter(|c| c.enabled) {
+            let Some(app) = catalog.get(&choice.id) else {
+                continue;
+            };
+            let app_name = app.display_name(lang).to_string();
+            let app_key = format!("{APPS_DIR}/{}", sanitize_segment(&app_name));
+            let present = app.present_folders(known);
+            let several = present.len() > 1;
+            for (folder, root) in present {
+                let label = folder.label.clone().or_else(|| {
+                    several
+                        .then(|| root.file_name().map(|n| n.to_string_lossy().into_owned()))
+                        .flatten()
+                });
+                let key = match (&label, several) {
+                    (Some(label), true) => format!("{app_key}/{}", sanitize_segment(label)),
+                    _ => app_key.clone(),
+                };
+                let (include_paths, exclude_paths) = if folder.only.is_empty() {
+                    (Vec::new(), Vec::new())
+                } else {
+                    (
+                        folder.only.clone(),
+                        vec![super::selection::ROOT.to_string()],
+                    )
+                };
+                sources.folders.push(BackupSource {
+                    key: unique_key(&key, &mut used),
+                    name: match label {
+                        Some(label) if several => format!("{app_name} · {label}"),
+                        _ => app_name.clone(),
+                    },
+                    root,
+                    portable: Some(folder.path.clone()),
+                    app: Some(app.id.clone()),
+                    excludes: folder.exclude.clone(),
+                    include_paths,
+                    exclude_paths,
+                });
+            }
+            for key in app.present_registry_keys() {
+                sources.registry.push(RegistrySource {
+                    app: app.id.clone(),
+                    app_name: app_name.clone(),
+                    key: key.to_string(),
+                });
+            }
+        }
+        sources
+    }
+}
+
+/// A single folder name that is valid on Windows.
+pub fn sanitize_segment(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect::<String>()
+        .trim()
+        .trim_end_matches('.')
+        .to_string();
+    if cleaned.is_empty() {
+        "source".to_string()
+    } else {
+        cleaned
+    }
+}
+
+/// Makes a `/`-separated key unique (case-insensitive) by appending ` (2)` …
+pub fn unique_key(key: &str, used: &mut HashSet<String>) -> String {
+    let mut candidate = key.to_string();
+    let mut n = 2;
+    while !used.insert(candidate.to_lowercase()) {
+        candidate = format!("{key} ({n})");
+        n += 1;
+    }
+    candidate
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keys_are_unique_and_safe() {
+        let mut used = HashSet::new();
+        assert_eq!(unique_key("Documents", &mut used), "Documents");
+        assert_eq!(unique_key("documents", &mut used), "documents (2)");
+        assert_eq!(sanitize_segment("A:B/C"), "A_B_C");
+        assert_eq!(sanitize_segment(".."), "source");
+    }
+}

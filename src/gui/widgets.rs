@@ -159,6 +159,8 @@ pub fn button(ui: &mut Ui, kind: ButtonKind, text: &str, enabled: bool) -> Respo
         painter.galley(pos, galley, text_color.gamma_multiply(alpha));
     }
 
+    // Custom-painted widgets describe themselves for screen readers (AccessKit).
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, text));
     if enabled {
         response.on_hover_cursor(CursorIcon::PointingHand)
     } else {
@@ -198,11 +200,56 @@ pub fn nav_tab(ui: &mut Ui, text: &str, selected: bool, enabled: bool) -> Respon
             Stroke::new(2.0, p.accent),
         );
     }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, enabled, selected, text)
+    });
     if enabled {
         response.on_hover_cursor(CursorIcon::PointingHand)
     } else {
         response
     }
+}
+
+/// An on/off switch with an accessible `label`. Returns `true` when it was flipped.
+pub fn toggle(ui: &mut Ui, on: &mut bool, enabled: bool, label: &str) -> bool {
+    let p = *palette(ui);
+    let size = egui::vec2(40.0, 22.0);
+    let (rect, response) = ui.allocate_exact_size(
+        size,
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    let t = ui.ctx().animate_bool_responsive(response.id, *on);
+    let track = if *on { p.accent } else { p.raised };
+    let alpha = if enabled { 1.0 } else { 0.5 };
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(11),
+        track.gamma_multiply(alpha),
+        Stroke::new(1.0, if *on { p.accent } else { p.border }),
+        egui::StrokeKind::Inside,
+    );
+    let x = egui::lerp((rect.left() + 11.0)..=(rect.right() - 11.0), t);
+    let knob = if *on { p.on_accent } else { p.text_secondary };
+    ui.painter().circle_filled(
+        Pos2::new(x, rect.center().y),
+        7.5,
+        knob.gamma_multiply(alpha),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, *on, label)
+    });
+    if enabled && response.clicked() {
+        *on = !*on;
+        return true;
+    }
+    if enabled {
+        response.on_hover_cursor(CursorIcon::PointingHand);
+    }
+    false
 }
 
 pub fn status_dot(ui: &mut Ui, color: Color32) {

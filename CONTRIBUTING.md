@@ -12,17 +12,52 @@ reports, translations, documentation and code.
 
    ```powershell
    cargo run                 # starts the GUI (debug build, with console log)
-   cargo test                # engine and configuration tests
+   cargo test                # engine, encryption, registry and interface tests
    cargo run -- backup --dry-run
    ```
 
 3. To try things without touching your real settings, point AeternaVault to a
-   separate folder:
+   separate folder — and, for application settings, to a fake user profile:
 
    ```powershell
    $env:AETERNAVAULT_HOME = "$env:TEMP\aeterna-dev"
+   $env:AETERNAVAULT_PROFILE_ROOT = "$env:TEMP\aeterna-profile"   # optional
    cargo run
    ```
+
+   With `AETERNAVAULT_PROFILE_ROOT` set, `{APPDATA}` and the other folders
+   resolve inside that folder, and the real registry and program list are hidden.
+
+## Interface tests and screenshots
+
+`src/gui/tests.rs` drives the real interface without a window using
+[`egui_kittest`](https://crates.io/crates/egui_kittest): widgets are found by
+their accessible label. Custom widgets therefore set `widget_info` — please keep
+that when adding new ones (it also helps screen readers).
+
+The README screenshots are rendered from demo data by an ignored test:
+
+```powershell
+$env:AETERNAVAULT_HOME = '<folder with a demo config.toml>'
+$env:AETERNAVAULT_PROFILE_ROOT = '<fake user profile>'
+$env:AETERNAVAULT_SCREENSHOTS = 'docs\screenshots'
+cargo test render_readme_screenshots -- --ignored
+```
+
+## Adding applications to the catalog
+
+Entries live in `src/platform/apps.toml` (format described at the top of the
+file). Please:
+
+- use path tokens (`{APPDATA}`, `{LOCALAPPDATA}`, …), never absolute paths;
+- exclude caches, logs, crash reports and lock files;
+- use `only` for single files in large folders (e.g. `.gitconfig` in `{USERPROFILE}`);
+- add `processes` so AeternaVault can warn when the application is open;
+- add a `note_en` / `note_de` if something is not restorable (e.g. passwords
+  protected by the Windows account);
+- keep registry keys under `HKCU\`.
+
+A test checks that every entry is valid.
 
 ## Before opening a pull request
 
@@ -37,10 +72,15 @@ The same checks run in CI.
 ## Guidelines
 
 - **The preview must stay read-only.** `engine/plan.rs`, `engine/scan.rs`,
-  `engine/snapshots.rs` and `engine/manifest.rs` must not write to disk. All
-  writing goes through `engine/fsops.rs`. A unit test checks this.
-- **Never delete user data.** Restores only create or replace files; backups
-  only add new snapshot folders.
+  `engine/sources.rs`, `engine/selection.rs`, `engine/snapshots.rs` and
+  `engine/manifest.rs` must not write to disk or the registry. File writing goes
+  through `engine/fsops.rs`. A unit test checks this.
+- **Never delete user data.** Restores only create or replace files and registry
+  values; backups only add new backup folders and blobs.
+- **Cryptography changes** need a matching update of `docs/ENCRYPTION.md` and a
+  new format version; existing vaults must stay readable.
+- **Tests must not change the system.** Do not install scheduled tasks or write
+  outside temporary folders (the registry test uses a throw-away HKCU key).
 - **Code and comments in English.** Keep comments short and explain *why*
   something is done, especially around Windows APIs.
 - **User-facing text lives in `src/i18n.rs`.** Add every new text in English and

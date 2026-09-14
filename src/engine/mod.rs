@@ -2,23 +2,30 @@
 //!
 //! Every operation runs in two strictly separated steps:
 //!
-//! 1. **Plan** ([`plan`], [`scan`], [`snapshots`], [`manifest`]): read-only.
-//!    Walks the sources or a snapshot and produces a [`plan::BackupPlan`] or
-//!    [`plan::RestorePlan`]. This is the preview / dry-run. These modules never
-//!    call a writing file-system function; a unit test below enforces that.
+//! 1. **Plan** ([`plan`], [`scan`], [`sources`], [`selection`], [`snapshots`],
+//!    [`manifest`]): read-only. Walks the sources or a snapshot and produces a
+//!    [`plan::BackupPlan`] or [`plan::RestorePlan`]. This is the preview /
+//!    dry-run. These modules never call a writing function; a unit test below
+//!    enforces that.
 //! 2. **Execute** ([`backup`], [`restore`]): takes a plan the user has
-//!    confirmed and performs it. All writing goes through [`fsops`].
+//!    confirmed and performs it. All file writing goes through `fsops`.
+//!
+//! Encryption lives in [`crypto`] (primitives) and [`vault`] (on-disk vault).
 
 pub mod backup;
+pub mod crypto;
 pub mod export;
 mod fsops;
 pub mod manifest;
 pub mod plan;
 pub mod restore;
 pub mod scan;
+pub mod selection;
 pub mod snapshots;
+pub mod sources;
 #[cfg(test)]
 mod tests;
+pub mod vault;
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -202,6 +209,8 @@ mod unit_tests {
             ("scan.rs", include_str!("scan.rs")),
             ("snapshots.rs", include_str!("snapshots.rs")),
             ("manifest.rs", include_str!("manifest.rs")),
+            ("sources.rs", include_str!("sources.rs")),
+            ("selection.rs", include_str!("selection.rs")),
         ];
         let forbidden = [
             "fs::write",
@@ -217,6 +226,10 @@ mod unit_tests {
             "set_modified",
             "fsops",
             "Command::new",
+            "registry::import",
+            "write_utf16",
+            "remember_key",
+            "vault::create",
         ];
         for (file, source) in sources {
             for word in forbidden {

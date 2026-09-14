@@ -61,6 +61,13 @@ pub struct Source {
     /// Additional exclude patterns for this source only.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub exclude: Vec<String>,
+    /// Individually chosen sub-folders and files (relative, `/`-separated).
+    /// The nearest entry wins; `"."` stands for the whole folder.
+    /// See [`crate::engine::selection`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub include_paths: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub exclude_paths: Vec<String>,
 }
 
 impl Default for Source {
@@ -70,6 +77,8 @@ impl Default for Source {
             path: PathBuf::new(),
             enabled: true,
             exclude: Vec::new(),
+            include_paths: Vec::new(),
+            exclude_paths: Vec::new(),
         }
     }
 }
@@ -80,8 +89,16 @@ impl Source {
             name: name.into(),
             path: path.into(),
             enabled,
-            exclude: Vec::new(),
+            ..Self::default()
         }
+    }
+
+    pub fn selection(&self) -> crate::engine::selection::Selection<'_> {
+        crate::engine::selection::Selection::new(&self.include_paths, &self.exclude_paths)
+    }
+
+    pub fn is_partial(&self) -> bool {
+        !self.include_paths.is_empty() || !self.exclude_paths.is_empty()
     }
 
     /// Display name, falling back to the folder name.
@@ -110,6 +127,9 @@ pub struct Advanced {
     /// Compare SHA-256 checksums while restoring.
     pub verify_on_restore: bool,
     pub restore_conflict: ConflictPolicy,
+    /// Save a list of installed programs (and a `winget` export if available)
+    /// with every backup, to make reinstalling on a new computer easier.
+    pub save_program_list: bool,
 }
 
 impl Default for Advanced {
@@ -120,8 +140,94 @@ impl Default for Advanced {
             confirm_before_start: true,
             verify_on_restore: true,
             restore_conflict: ConflictPolicy::default(),
+            save_program_list: true,
         }
     }
+}
+
+/// An application from the catalog chosen for backup.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppChoice {
+    pub id: String,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Frequency {
+    #[default]
+    Daily,
+    Weekly,
+    /// Every few hours.
+    Hourly,
+    /// A few minutes after signing in to Windows.
+    AtLogon,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Weekday {
+    Monday,
+    Tuesday,
+    Wednesday,
+    Thursday,
+    Friday,
+    Saturday,
+    #[default]
+    Sunday,
+}
+
+impl Weekday {
+    pub const ALL: [Weekday; 7] = [
+        Weekday::Monday,
+        Weekday::Tuesday,
+        Weekday::Wednesday,
+        Weekday::Thursday,
+        Weekday::Friday,
+        Weekday::Saturday,
+        Weekday::Sunday,
+    ];
+}
+
+/// Automatic backups (Windows Task Scheduler).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Schedule {
+    pub enabled: bool,
+    pub frequency: Frequency,
+    /// "HH:MM", local time.
+    pub time: String,
+    pub weekday: Weekday,
+    pub every_hours: u8,
+    /// Run as soon as possible if the computer was off at the planned time.
+    pub catch_up: bool,
+    pub only_on_ac_power: bool,
+}
+
+impl Default for Schedule {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            frequency: Frequency::Daily,
+            time: "20:00".into(),
+            weekday: Weekday::Sunday,
+            every_hours: 4,
+            catch_up: true,
+            only_on_ac_power: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Encryption {
+    /// New backups are written into the encrypted vault at the destination.
+    pub enabled: bool,
 }
 
 /// Optional font overrides. Empty means: use the built-in choice
@@ -145,10 +251,15 @@ pub struct Config {
     /// Exclude patterns (glob syntax) applied to file and folder names and to
     /// paths relative to the source, case-insensitive.
     pub exclude: Vec<String>,
+    pub encryption: Encryption,
+    pub schedule: Schedule,
     pub advanced: Advanced,
     pub fonts: Fonts,
     #[serde(rename = "source")]
     pub sources: Vec<Source>,
+    /// Applications whose settings are backed up (see the catalog).
+    #[serde(rename = "application")]
+    pub apps: Vec<AppChoice>,
 }
 
 impl Default for Config {
@@ -159,9 +270,12 @@ impl Default for Config {
             destination: PathBuf::new(),
             mode: BackupMode::Incremental,
             exclude: default_excludes(),
+            encryption: Encryption::default(),
+            schedule: Schedule::default(),
             advanced: Advanced::default(),
             fonts: Fonts::default(),
             sources: Vec::new(),
+            apps: Vec::new(),
         }
     }
 }
@@ -213,15 +327,35 @@ impl Config {
             }
         }
 
-        for profile in platform::apps::known_profiles(lang) {
-            if profile.suggest_on_first_run {
-                let mut source = Source::new(profile.name, profile.path, false);
-                source.exclude = profile.exclude;
-                config.sources.push(source);
-            }
+        // Pre-select the settings of applications found on this computer.
+        let catalog = platform::apps::Catalog::builtin();
+        let known = platform::known_paths::KnownPaths::current();
+        for app in catalog
+            .apps
+            .iter()
+            .filter(|a| a.default && a.is_detected(&known))
+        {
+            config.apps.push(AppChoice {
+                id: app.id.clone(),
+                enabled: true,
+            });
         }
 
         config
+    }
+
+    pub fn app_enabled(&self, id: &str) -> bool {
+        self.apps.iter().any(|a| a.id == id && a.enabled)
+    }
+
+    pub fn set_app_enabled(&mut self, id: &str, enabled: bool) {
+        match self.apps.iter_mut().find(|a| a.id == id) {
+            Some(choice) => choice.enabled = enabled,
+            None => self.apps.push(AppChoice {
+                id: id.to_string(),
+                enabled,
+            }),
+        }
     }
 
     pub fn enabled_sources(&self) -> impl Iterator<Item = &Source> {
@@ -267,7 +401,15 @@ const CONFIG_HEADER: &str = "\
 #   name = \"Documents\"
 #   path = 'C:\\Users\\you\\Documents'
 #   enabled = true
-#   exclude = [\"*.bak\"]          # optional
+#   exclude = [\"*.bak\"]          # optional patterns
+#   exclude_paths = [\"Old stuff\"] # optional: sub-folders or files left out
+#   include_paths = []             # optional: with exclude_paths = [\".\"], only these
+#
+# Each [[application]] block selects the settings of one application from the
+# catalog (ids are listed in the Applications view):
+#   [[application]]
+#   id = \"firefox\"
+#   enabled = true
 ";
 
 /// Outcome of loading the configuration, used to show a quiet notice in the UI.

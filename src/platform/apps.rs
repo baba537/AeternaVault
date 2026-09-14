@@ -1,147 +1,188 @@
-//! Application discovery (read-only).
+//! Application settings catalog and installed-program discovery.
 //!
-//! Two sources of information:
-//! * A small catalog of well-known application data folders that are worth
-//!   backing up (browser profiles, mail, editor settings). Only entries that
-//!   exist on this computer are returned.
-//! * Installed desktop applications from the `Uninstall` registry keys
-//!   (HKLM, HKLM\WOW6432Node, HKCU). This is the same data "Apps & features"
-//!   shows. Microsoft Store apps are not listed yet (see docs/ROADMAP.md).
+//! The catalog (`apps.toml`, embedded at build time) describes where
+//! applications keep their settings: folders (with portable path tokens) and
+//! HKCU registry keys. Users can extend or override it with an `apps.toml`
+//! next to their `config.toml`.
+//!
+//! Installed desktop programs are read from the `Uninstall` registry keys
+//! (the same data "Apps & features" shows). A list is saved with every backup
+//! to help reinstalling on a new computer.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use serde::Deserialize;
+
+use super::known_paths::KnownPaths;
 use crate::i18n::Lang;
 
-#[derive(Debug, Clone)]
-pub struct KnownProfile {
-    pub name: String,
-    pub path: PathBuf,
+const BUILTIN: &str = include_str!("apps.toml");
+pub const USER_CATALOG_FILE: &str = "apps.toml";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Category {
+    Browsers,
+    Email,
+    Communication,
+    Office,
+    Development,
+    Media,
+    Gaming,
+    Security,
+    Utilities,
+    Windows,
+}
+
+impl Category {
+    pub const ALL: [Category; 10] = [
+        Category::Browsers,
+        Category::Email,
+        Category::Communication,
+        Category::Office,
+        Category::Development,
+        Category::Media,
+        Category::Gaming,
+        Category::Security,
+        Category::Utilities,
+        Category::Windows,
+    ];
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppFolder {
+    /// Portable path, e.g. `{APPDATA}\Mozilla\Firefox`.
+    pub path: String,
+    /// Sub-folder inside the application's backup folder (when an app has several).
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
     pub exclude: Vec<String>,
-    /// Added (disabled) to the source list on first start.
-    pub suggest_on_first_run: bool,
+    /// If not empty, only these relative paths are taken.
+    #[serde(default)]
+    pub only: Vec<String>,
 }
 
-enum Base {
-    RoamingAppData,
-    LocalAppData,
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppDef {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub name_de: Option<String>,
+    pub category: Category,
+    #[serde(default = "default_true")]
+    pub default: bool,
+    #[serde(default)]
+    pub processes: Vec<String>,
+    #[serde(default)]
+    pub note_en: Option<String>,
+    #[serde(default)]
+    pub note_de: Option<String>,
+    #[serde(default, rename = "folder")]
+    pub folders: Vec<AppFolder>,
+    #[serde(default)]
+    pub registry: Vec<String>,
 }
 
-struct CatalogEntry {
-    /// English and German display name.
-    name: [&'static str; 2],
-    base: Base,
-    relative: &'static str,
-    exclude: &'static [&'static str],
-    suggest_on_first_run: bool,
+fn default_true() -> bool {
+    true
 }
 
-/// Extend this list to teach AeternaVault about more applications.
-const CATALOG: &[CatalogEntry] = &[
-    CatalogEntry {
-        name: ["Firefox profile", "Firefox-Profil"],
-        base: Base::RoamingAppData,
-        relative: r"Mozilla\Firefox",
-        exclude: &[
-            "Crash Reports",
-            "Pending Pings",
-            "datareporting",
-            "parent.lock",
-        ],
-        suggest_on_first_run: true,
-    },
-    CatalogEntry {
-        name: ["Thunderbird profile", "Thunderbird-Profil"],
-        base: Base::RoamingAppData,
-        relative: "Thunderbird",
-        exclude: &["Crash Reports", "Pending Pings", "parent.lock"],
-        suggest_on_first_run: true,
-    },
-    CatalogEntry {
-        name: ["Google Chrome profile", "Google-Chrome-Profil"],
-        base: Base::LocalAppData,
-        relative: r"Google\Chrome\User Data",
-        exclude: CHROMIUM_CACHES,
-        suggest_on_first_run: false,
-    },
-    CatalogEntry {
-        name: ["Microsoft Edge profile", "Microsoft-Edge-Profil"],
-        base: Base::LocalAppData,
-        relative: r"Microsoft\Edge\User Data",
-        exclude: CHROMIUM_CACHES,
-        suggest_on_first_run: false,
-    },
-    CatalogEntry {
-        name: [
-            "Visual Studio Code settings",
-            "Visual-Studio-Code-Einstellungen",
-        ],
-        base: Base::RoamingAppData,
-        relative: r"Code\User",
-        exclude: &["workspaceStorage", "History"],
-        suggest_on_first_run: false,
-    },
-    CatalogEntry {
-        name: ["Notepad++ settings", "Notepad++-Einstellungen"],
-        base: Base::RoamingAppData,
-        relative: "Notepad++",
-        exclude: &["backup"],
-        suggest_on_first_run: false,
-    },
-    CatalogEntry {
-        name: ["Outlook signatures", "Outlook-Signaturen"],
-        base: Base::RoamingAppData,
-        relative: r"Microsoft\Signatures",
-        exclude: &[],
-        suggest_on_first_run: false,
-    },
-    CatalogEntry {
-        name: [
-            "Windows Terminal settings",
-            "Windows-Terminal-Einstellungen",
-        ],
-        base: Base::LocalAppData,
-        relative: r"Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState",
-        exclude: &[],
-        suggest_on_first_run: false,
-    },
-];
+impl AppDef {
+    pub fn display_name(&self, lang: Lang) -> &str {
+        match (lang, &self.name_de) {
+            (Lang::De, Some(name)) => name,
+            _ => &self.name,
+        }
+    }
 
-const CHROMIUM_CACHES: &[&str] = &[
-    "Cache",
-    "Code Cache",
-    "GPUCache",
-    "DawnCache",
-    "GrShaderCache",
-    "ShaderCache",
-    "Service Worker",
-    "Crashpad",
-    "*.log",
-];
+    pub fn note(&self, lang: Lang) -> Option<&str> {
+        match lang {
+            Lang::De => self.note_de.as_deref().or(self.note_en.as_deref()),
+            Lang::En => self.note_en.as_deref(),
+        }
+    }
 
-pub fn known_profiles(lang: Lang) -> Vec<KnownProfile> {
-    let Some(base) = directories::BaseDirs::new() else {
-        return Vec::new();
-    };
-    CATALOG
-        .iter()
-        .filter_map(|entry| {
-            let root = match entry.base {
-                Base::RoamingAppData => base.config_dir(),
-                Base::LocalAppData => base.data_local_dir(),
-            };
-            let path = root.join(entry.relative);
-            path.is_dir().then(|| KnownProfile {
-                name: match lang {
-                    Lang::En => entry.name[0],
-                    Lang::De => entry.name[1],
-                }
-                .to_string(),
-                path,
-                exclude: entry.exclude.iter().map(|s| s.to_string()).collect(),
-                suggest_on_first_run: entry.suggest_on_first_run,
+    /// Folders that exist on this computer, with their resolved absolute path.
+    pub fn present_folders(&self, known: &KnownPaths) -> Vec<(&AppFolder, PathBuf)> {
+        self.folders
+            .iter()
+            .filter_map(|folder| {
+                let root = known.resolve(&folder.path)?;
+                let present = if folder.only.is_empty() {
+                    root.is_dir()
+                } else {
+                    folder
+                        .only
+                        .iter()
+                        .any(|p| root.join(p.replace('/', "\\")).exists())
+                };
+                present.then_some((folder, root))
             })
-        })
-        .collect()
+            .collect()
+    }
+
+    pub fn present_registry_keys(&self) -> Vec<&str> {
+        self.registry
+            .iter()
+            .map(String::as_str)
+            .filter(|key| super::registry::key_exists(key))
+            .collect()
+    }
+
+    pub fn is_detected(&self, known: &KnownPaths) -> bool {
+        !self.present_folders(known).is_empty() || !self.present_registry_keys().is_empty()
+    }
+
+    pub fn is_running(&self, running: &std::collections::HashSet<String>) -> bool {
+        self.processes
+            .iter()
+            .any(|p| running.contains(&p.to_lowercase()))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Catalog {
+    pub apps: Vec<AppDef>,
+}
+
+#[derive(Deserialize)]
+struct CatalogFile {
+    #[serde(default, rename = "app")]
+    apps: Vec<AppDef>,
+}
+
+impl Catalog {
+    pub fn builtin() -> Self {
+        let file: CatalogFile = toml::from_str(BUILTIN).expect("the built-in catalog is valid");
+        Self { apps: file.apps }
+    }
+
+    /// Built-in catalog merged with the user's `apps.toml`, if present.
+    pub fn load(config_dir: &Path) -> Self {
+        let mut catalog = Self::builtin();
+        let user_file = config_dir.join(USER_CATALOG_FILE);
+        match std::fs::read_to_string(&user_file) {
+            Ok(text) => match toml::from_str::<CatalogFile>(&text) {
+                Ok(user) => {
+                    for app in user.apps {
+                        match catalog.apps.iter_mut().find(|a| a.id == app.id) {
+                            Some(existing) => *existing = app,
+                            None => catalog.apps.push(app),
+                        }
+                    }
+                }
+                Err(err) => tracing::warn!("{} could not be read: {err}", user_file.display()),
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => tracing::warn!("{} could not be read: {err}", user_file.display()),
+        }
+        catalog
+    }
+
+    pub fn get(&self, id: &str) -> Option<&AppDef> {
+        self.apps.iter().find(|a| a.id == id)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +200,10 @@ pub fn installed_apps() -> Vec<InstalledApp> {
 
     const UNINSTALL: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
     const UNINSTALL_WOW: &str = r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall";
+
+    if super::known_paths::profile_override().is_some() {
+        return demo_programs();
+    }
 
     let hives = [
         (HKEY_LOCAL_MACHINE, UNINSTALL),
@@ -205,4 +250,136 @@ pub fn installed_apps() -> Vec<InstalledApp> {
 #[cfg(not(windows))]
 pub fn installed_apps() -> Vec<InstalledApp> {
     Vec::new()
+}
+
+/// A neutral example list for the demo mode (see `known_paths::profile_override`).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn demo_programs() -> Vec<InstalledApp> {
+    [
+        ("7-Zip 24.08 (x64)", "24.08", "Igor Pavlov"),
+        ("Firefox", "143.0", "Mozilla"),
+        ("LibreOffice 25.8", "25.8.1", "The Document Foundation"),
+        ("Thunderbird", "143.0", "Mozilla"),
+        ("VLC media player", "3.0.21", "VideoLAN"),
+    ]
+    .into_iter()
+    .map(|(name, version, publisher)| InstalledApp {
+        name: name.into(),
+        version: version.into(),
+        publisher: publisher.into(),
+        install_location: None,
+    })
+    .collect()
+}
+
+/// Plain-text list of installed programs for the backup.
+pub fn program_list_text(apps: &[InstalledApp]) -> String {
+    let mut out = String::from(
+        "Installed programs\r\n\
+         ==================\r\n\
+         Saved by AeternaVault as a checklist for reinstalling.\r\n\
+         If 'winget-packages.json' is next to this file, most programs can be\r\n\
+         reinstalled at once with:  winget import -i winget-packages.json\r\n\r\n",
+    );
+    for app in apps {
+        out.push_str(&app.name);
+        if !app.version.is_empty() {
+            out.push_str(&format!("  ({})", app.version));
+        }
+        if !app.publisher.is_empty() {
+            out.push_str(&format!("  — {}", app.publisher));
+        }
+        out.push_str("\r\n");
+    }
+    out
+}
+
+/// Runs `winget export` into `target`. Returns `false` if winget is not
+/// available or fails; this is optional and never blocks a backup.
+pub fn winget_export(target: &Path) -> bool {
+    if super::known_paths::profile_override().is_some() {
+        return false;
+    }
+    let mut command = std::process::Command::new("winget");
+    command
+        .args([
+            "export",
+            "--source",
+            "winget",
+            "--disable-interactivity",
+            "-o",
+        ])
+        .arg(target)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success() && target.is_file(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            _ => {
+                let _ = child.kill();
+                return false;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn builtin_catalog_is_consistent() {
+        let catalog = Catalog::builtin();
+        assert!(catalog.apps.len() >= 50);
+        let mut ids = HashSet::new();
+        let known = KnownPaths {
+            values: KnownPaths::current().values,
+        };
+        for app in &catalog.apps {
+            assert!(ids.insert(app.id.clone()), "duplicate id {}", app.id);
+            assert!(
+                !app.folders.is_empty() || !app.registry.is_empty(),
+                "{} has nothing to back up",
+                app.id
+            );
+            for folder in &app.folders {
+                assert!(
+                    folder.path.starts_with('{'),
+                    "{}: path must use a token",
+                    app.id
+                );
+                assert!(
+                    known.resolve(&folder.path).is_some() || folder.path.contains("PROGRAMFILES")
+                );
+                for only in &folder.only {
+                    assert!(
+                        crate::engine::safe_relative_path(only).is_some(),
+                        "{}: {only}",
+                        app.id
+                    );
+                }
+            }
+            for key in &app.registry {
+                assert!(
+                    super::super::registry::hkcu_subkey(key).is_some(),
+                    "{}: {key}",
+                    app.id
+                );
+            }
+        }
+    }
 }

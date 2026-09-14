@@ -7,6 +7,8 @@
 //! * Cloud placeholders (OneDrive "online-only" files) are skipped by default,
 //!   because reading them would download them.
 //! * The destination folder is skipped if it lies inside a source.
+//! * Individually deselected sub-folders are not entered at all; when only a
+//!   few paths are selected, only those are visited.
 //! * Access errors do not abort the scan; they become skipped entries.
 
 use std::path::{Path, PathBuf};
@@ -14,7 +16,11 @@ use std::path::{Path, PathBuf};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use walkdir::WalkDir;
 
-use super::{CancelToken, Phase, Progress, Reporter, path_is_within, rel_to_string, to_unix_nanos};
+use super::selection::Selection;
+use super::{
+    CancelToken, Phase, Progress, Reporter, path_is_within, rel_to_string, safe_relative_path,
+    to_unix_nanos,
+};
 use crate::error::{EngineError, EngineResult};
 
 #[derive(Debug, Clone)]
@@ -49,6 +55,7 @@ pub struct ScanResult {
 
 pub struct ScanOptions<'a> {
     pub excludes: &'a Excludes,
+    pub selection: Selection<'a>,
     pub skip_online_only: bool,
     pub destination: &'a Path,
 }
@@ -133,7 +140,54 @@ pub fn scan_source(
         return Ok(result);
     }
 
-    let mut walker = WalkDir::new(root).follow_links(false).into_iter();
+    match options.selection.scan_roots() {
+        None => walk(root, root, options, cancel, progress, reporter, &mut result)?,
+        Some(starts) => {
+            for start in starts {
+                let Some(rel) = safe_relative_path(&start) else {
+                    continue;
+                };
+                let path = root.join(rel);
+                match std::fs::symlink_metadata(&path) {
+                    Ok(meta) if meta.is_dir() => walk(
+                        root,
+                        &path,
+                        options,
+                        cancel,
+                        progress,
+                        reporter,
+                        &mut result,
+                    )?,
+                    Ok(meta) if meta.is_file() => {
+                        consider_file(root, &path, meta, options, progress, reporter, &mut result)
+                    }
+                    Ok(_) => result.skipped.push(SkippedEntry {
+                        path,
+                        reason: SkipReason::Link,
+                    }),
+                    // Selected items that do not exist (yet) are simply not there.
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => result.skipped.push(SkippedEntry {
+                        path,
+                        reason: SkipReason::NoAccess(err.to_string()),
+                    }),
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn walk(
+    root: &Path,
+    start: &Path,
+    options: &ScanOptions<'_>,
+    cancel: &CancelToken,
+    progress: &mut Progress,
+    reporter: &mut Reporter<'_>,
+    result: &mut ScanResult,
+) -> EngineResult<()> {
+    let mut walker = WalkDir::new(start).follow_links(false).into_iter();
     while let Some(next) = walker.next() {
         if cancel.is_cancelled() {
             return Err(EngineError::Cancelled);
@@ -145,7 +199,7 @@ pub fn scan_source(
                 let path = err
                     .path()
                     .map(Path::to_path_buf)
-                    .unwrap_or_else(|| root.to_path_buf());
+                    .unwrap_or_else(|| start.to_path_buf());
                 result.skipped.push(SkippedEntry {
                     path,
                     reason: SkipReason::NoAccess(err.to_string()),
@@ -153,23 +207,25 @@ pub fn scan_source(
                 continue;
             }
         };
-        if entry.depth() == 0 {
-            continue;
-        }
 
         let path = entry.path();
         let Ok(rel_path) = path.strip_prefix(root) else {
             continue;
         };
+        if rel_path.as_os_str().is_empty() {
+            continue;
+        }
         let rel = rel_to_string(rel_path);
         let name = entry.file_name().to_string_lossy();
         let file_type = entry.file_type();
 
         if file_type.is_symlink() {
-            result.skipped.push(SkippedEntry {
-                path: path.to_path_buf(),
-                reason: SkipReason::Link,
-            });
+            if options.selection.is_included(&rel) {
+                result.skipped.push(SkippedEntry {
+                    path: path.to_path_buf(),
+                    reason: SkipReason::Link,
+                });
+            }
             continue;
         }
 
@@ -180,69 +236,119 @@ pub fn scan_source(
                     reason: SkipReason::InsideDestination,
                 });
                 walker.skip_current_dir();
-            } else if options.excludes.is_excluded(&name, &rel) {
+            } else if options.excludes.is_excluded(&name, &rel)
+                || !options.selection.should_enter(&rel)
+            {
                 result.excluded += 1;
                 walker.skip_current_dir();
             }
             continue;
         }
 
-        if options.excludes.is_excluded(&name, &rel) {
+        if options.excludes.is_excluded(&name, &rel) || !options.selection.is_included(&rel) {
             result.excluded += 1;
             continue;
         }
 
-        let meta = match entry.metadata() {
-            Ok(meta) => meta,
-            Err(err) => {
-                result.skipped.push(SkippedEntry {
-                    path: path.to_path_buf(),
-                    reason: SkipReason::NoAccess(err.to_string()),
-                });
-                continue;
-            }
-        };
-
-        if options.skip_online_only && is_online_only(&meta) {
-            result.skipped.push(SkippedEntry {
+        match entry.metadata() {
+            Ok(meta) => consider_file(root, path, meta, options, progress, reporter, result),
+            Err(err) => result.skipped.push(SkippedEntry {
                 path: path.to_path_buf(),
-                reason: SkipReason::OnlineOnly,
-            });
-            continue;
-        }
-
-        let modified = meta.modified().map(to_unix_nanos).unwrap_or(0);
-        result.files.push(ScannedFile {
-            rel,
-            size: meta.len(),
-            modified,
-        });
-
-        progress.phase = Phase::Scanning;
-        progress.files_done += 1;
-        progress.bytes_done += meta.len();
-        if progress.files_done % 64 == 0 {
-            progress.current = path.display().to_string();
-            reporter.maybe(progress);
+                reason: SkipReason::NoAccess(err.to_string()),
+            }),
         }
     }
-
-    Ok(result)
+    Ok(())
 }
 
-/// Quick size estimate of a folder for the source list (no excludes, errors ignored).
-pub fn folder_size(root: &Path, cancel: &CancelToken) -> Option<(u64, u64)> {
+fn consider_file(
+    root: &Path,
+    path: &Path,
+    meta: std::fs::Metadata,
+    options: &ScanOptions<'_>,
+    progress: &mut Progress,
+    reporter: &mut Reporter<'_>,
+    result: &mut ScanResult,
+) {
+    let Ok(rel_path) = path.strip_prefix(root) else {
+        return;
+    };
+    let rel = rel_to_string(rel_path);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if options.excludes.is_excluded(&name, &rel) {
+        result.excluded += 1;
+        return;
+    }
+    if options.skip_online_only && is_online_only(&meta) {
+        result.skipped.push(SkippedEntry {
+            path: path.to_path_buf(),
+            reason: SkipReason::OnlineOnly,
+        });
+        return;
+    }
+
+    let modified = meta.modified().map(to_unix_nanos).unwrap_or(0);
+    result.files.push(ScannedFile {
+        rel,
+        size: meta.len(),
+        modified,
+    });
+
+    progress.phase = Phase::Scanning;
+    progress.files_done += 1;
+    progress.bytes_done += meta.len();
+    if progress.files_done.is_multiple_of(64) {
+        progress.current = path.display().to_string();
+        reporter.maybe(progress);
+    }
+}
+
+/// Quick size estimate of a folder for the source list (errors ignored).
+pub fn folder_size(
+    root: &Path,
+    selection: &Selection<'_>,
+    cancel: &CancelToken,
+) -> Option<(u64, u64)> {
+    if !root.is_dir() {
+        return None;
+    }
     let mut bytes = 0u64;
     let mut files = 0u64;
-    for entry in WalkDir::new(root).follow_links(false).into_iter().flatten() {
-        if cancel.is_cancelled() {
-            return None;
-        }
-        if entry.file_type().is_file()
-            && let Ok(meta) = entry.metadata()
-        {
-            bytes += meta.len();
-            files += 1;
+    let starts: Vec<PathBuf> = match selection.scan_roots() {
+        None => vec![root.to_path_buf()],
+        Some(roots) => roots
+            .iter()
+            .filter_map(|r| safe_relative_path(r))
+            .map(|r| root.join(r))
+            .collect(),
+    };
+    for start in starts {
+        let mut walker = WalkDir::new(&start).follow_links(false).into_iter();
+        while let Some(next) = walker.next() {
+            let Ok(entry) = next else {
+                continue;
+            };
+            if cancel.is_cancelled() {
+                return None;
+            }
+            let Ok(rel) = entry.path().strip_prefix(root) else {
+                continue;
+            };
+            let rel = rel_to_string(rel);
+            if entry.file_type().is_dir() {
+                if !rel.is_empty() && !selection.should_enter(&rel) {
+                    walker.skip_current_dir();
+                }
+            } else if entry.file_type().is_file()
+                && selection.is_included(&rel)
+                && let Ok(meta) = entry.metadata()
+            {
+                bytes += meta.len();
+                files += 1;
+            }
         }
     }
     Some((bytes, files))

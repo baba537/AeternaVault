@@ -1,0 +1,700 @@
+# AeternaVault application catalog
+#
+# Describes where applications keep their settings, so they can be backed up
+# and restored to the right place on another computer.
+#
+# To add or override entries without rebuilding, create `apps.toml` next to
+# `config.toml` with the same format. Entries with the same `id` replace the
+# built-in ones.
+#
+# Path tokens: {USERPROFILE} {APPDATA} {LOCALAPPDATA} {LOCALLOW} {DOCUMENTS}
+#              {PICTURES} {MUSIC} {VIDEOS} {DESKTOP} {DOWNLOADS} {SAVEDGAMES}
+#              {PROGRAMFILES} {PROGRAMFILESX86}
+#
+# Fields:
+#   id, name, name_de (optional), category, default (pre-selected, default true)
+#   processes  executables that should be closed for a consistent copy
+#   note_en / note_de  short hint shown in the app (optional)
+#   [[app.folder]] path, label (sub-folder in the backup), exclude (patterns),
+#                  only (relative paths; if set, nothing else is taken)
+#   registry   HKCU keys (other hives are not supported)
+#
+# Categories: browsers, email, communication, office, development, media,
+#             gaming, security, utilities, windows
+
+# ---------------------------------------------------------------- browsers
+
+[[app]]
+id = "firefox"
+name = "Firefox"
+category = "browsers"
+processes = ["firefox.exe"]
+note_en = "Bookmarks, passwords, extensions and settings of all profiles."
+note_de = "Lesezeichen, Passwörter, Erweiterungen und Einstellungen aller Profile."
+[[app.folder]]
+path = '{APPDATA}\Mozilla\Firefox'
+exclude = ["Crash Reports", "Pending Pings", "datareporting", "saved-telemetry-pings", "crashes", "minidumps", "parent.lock", "cache2", "startupCache", "shader-cache"]
+
+[[app]]
+id = "chrome"
+name = "Google Chrome"
+category = "browsers"
+processes = ["chrome.exe"]
+note_en = "Bookmarks, extensions and settings. Saved passwords are tied to the Windows account; use Chrome sync for them."
+note_de = "Lesezeichen, Erweiterungen und Einstellungen. Gespeicherte Passwörter sind an das Windows-Konto gebunden; dafür die Chrome-Synchronisierung nutzen."
+[[app.folder]]
+path = '{LOCALAPPDATA}\Google\Chrome\User Data'
+exclude = ["Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache", "GrShaderCache", "GraphiteDawnCache", "ShaderCache", "Service Worker", "Crashpad", "component_crx_cache", "optimization_guide_model_store", "Safe Browsing", "*.log", "LOCK"]
+
+[[app]]
+id = "edge"
+name = "Microsoft Edge"
+category = "browsers"
+processes = ["msedge.exe"]
+note_en = "Bookmarks, extensions and settings. Saved passwords are tied to the Windows account; use Edge sync for them."
+note_de = "Lesezeichen, Erweiterungen und Einstellungen. Gespeicherte Passwörter sind an das Windows-Konto gebunden; dafür die Edge-Synchronisierung nutzen."
+[[app.folder]]
+path = '{LOCALAPPDATA}\Microsoft\Edge\User Data'
+exclude = ["Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache", "GrShaderCache", "GraphiteDawnCache", "ShaderCache", "Service Worker", "Crashpad", "component_crx_cache", "optimization_guide_model_store", "Safe Browsing", "*.log", "LOCK"]
+
+[[app]]
+id = "brave"
+name = "Brave"
+category = "browsers"
+processes = ["brave.exe"]
+[[app.folder]]
+path = '{LOCALAPPDATA}\BraveSoftware\Brave-Browser\User Data'
+exclude = ["Cache", "Code Cache", "GPUCache", "DawnCache", "GrShaderCache", "ShaderCache", "Service Worker", "Crashpad", "component_crx_cache", "*.log", "LOCK"]
+
+[[app]]
+id = "vivaldi"
+name = "Vivaldi"
+category = "browsers"
+processes = ["vivaldi.exe"]
+[[app.folder]]
+path = '{LOCALAPPDATA}\Vivaldi\User Data'
+exclude = ["Cache", "Code Cache", "GPUCache", "DawnCache", "GrShaderCache", "ShaderCache", "Service Worker", "Crashpad", "*.log", "LOCK"]
+
+[[app]]
+id = "opera"
+name = "Opera"
+category = "browsers"
+processes = ["opera.exe"]
+[[app.folder]]
+path = '{APPDATA}\Opera Software\Opera Stable'
+exclude = ["Cache", "Code Cache", "GPUCache", "ShaderCache", "Service Worker", "Crash Reports", "*.log", "LOCK"]
+
+# ---------------------------------------------------------------- email
+
+[[app]]
+id = "thunderbird"
+name = "Thunderbird"
+category = "email"
+processes = ["thunderbird.exe"]
+note_en = "Mail, accounts, address books and settings."
+note_de = "E-Mails, Konten, Adressbücher und Einstellungen."
+[[app.folder]]
+path = '{APPDATA}\Thunderbird'
+exclude = ["Crash Reports", "Pending Pings", "datareporting", "crashes", "minidumps", "parent.lock", "cache2", "startupCache"]
+
+[[app]]
+id = "outlook-extras"
+name = "Outlook signatures and templates"
+name_de = "Outlook-Signaturen und Vorlagen"
+category = "email"
+processes = ["outlook.exe"]
+note_en = "Signatures, stationery and templates. Mail itself stays in the account or in PST files."
+note_de = "Signaturen, Briefpapier und Vorlagen. E-Mails selbst liegen im Konto oder in PST-Dateien."
+[[app.folder]]
+path = '{APPDATA}\Microsoft\Signatures'
+label = "Signatures"
+[[app.folder]]
+path = '{APPDATA}\Microsoft\Stationery'
+label = "Stationery"
+[[app.folder]]
+path = '{APPDATA}\Microsoft\Templates'
+label = "Templates"
+
+[[app]]
+id = "emclient"
+name = "eM Client"
+category = "email"
+processes = ["mailclient.exe"]
+[[app.folder]]
+path = '{APPDATA}\eM Client'
+exclude = ["Logs", "Cache"]
+
+# ---------------------------------------------------------------- communication
+
+[[app]]
+id = "telegram"
+name = "Telegram Desktop"
+category = "communication"
+processes = ["telegram.exe"]
+note_en = "Sign-in and settings. Media downloads are left out."
+note_de = "Anmeldung und Einstellungen. Heruntergeladene Medien bleiben außen vor."
+[[app.folder]]
+path = '{APPDATA}\Telegram Desktop\tdata'
+exclude = ["user_data", "emoji", "dumps", "temp"]
+
+[[app]]
+id = "signal"
+name = "Signal"
+category = "communication"
+default = false
+processes = ["signal.exe"]
+note_en = "The message database is protected by Windows; restoring on a different Windows account may not work."
+note_de = "Die Nachrichtendatenbank ist von Windows geschützt; auf einem anderen Windows-Konto funktioniert die Wiederherstellung womöglich nicht."
+[[app.folder]]
+path = '{APPDATA}\Signal'
+exclude = ["logs", "Cache", "Code Cache", "GPUCache", "Crashpad", "update-cache", "temp"]
+
+[[app]]
+id = "discord"
+name = "Discord"
+category = "communication"
+processes = ["discord.exe"]
+[[app.folder]]
+path = '{APPDATA}\discord'
+only = ["settings.json"]
+
+[[app]]
+id = "teamspeak"
+name = "TeamSpeak 3"
+category = "communication"
+processes = ["ts3client_win64.exe", "ts3client_win32.exe"]
+[[app.folder]]
+path = '{APPDATA}\TS3Client'
+exclude = ["logs", "cache", "chats"]
+
+# ---------------------------------------------------------------- office
+
+[[app]]
+id = "office"
+name = "Microsoft Office settings"
+name_de = "Microsoft-Office-Einstellungen"
+category = "office"
+processes = ["winword.exe", "excel.exe", "powerpnt.exe"]
+note_en = "Templates, custom dictionaries, AutoCorrect and ribbon customisations."
+note_de = "Vorlagen, eigene Wörterbücher, AutoKorrektur und Menüband-Anpassungen."
+[[app.folder]]
+path = '{APPDATA}\Microsoft\Templates'
+label = "Templates"
+[[app.folder]]
+path = '{APPDATA}\Microsoft\UProof'
+label = "Dictionaries"
+[[app.folder]]
+path = '{APPDATA}\Microsoft\Office'
+label = "AutoCorrect"
+only = ["MSO1031.acl", "MSO1033.acl", "MSO0127.acl", "Recent"]
+[[app.folder]]
+path = '{LOCALAPPDATA}\Microsoft\Office'
+label = "Ribbon"
+only = ["Word.officeUI", "Excel.officeUI", "PowerPoint.officeUI", "Outlook.officeUI", "olkexplorer.officeUI", "olkmailread.officeUI"]
+
+[[app]]
+id = "libreoffice"
+name = "LibreOffice"
+category = "office"
+processes = ["soffice.bin", "soffice.exe"]
+[[app.folder]]
+path = '{APPDATA}\LibreOffice\4\user'
+exclude = ["backup", "crash", "extensions\\tmp", "temp", "uno_packages\\cache"]
+
+[[app]]
+id = "obsidian"
+name = "Obsidian"
+category = "office"
+processes = ["obsidian.exe"]
+note_en = "App settings and the list of vaults. The vaults themselves are ordinary folders — add them as folders."
+note_de = "App-Einstellungen und die Liste der Vaults. Die Vaults selbst sind normale Ordner – bitte als Ordner hinzufügen."
+[[app.folder]]
+path = '{APPDATA}\obsidian'
+only = ["obsidian.json", "Preferences"]
+
+[[app]]
+id = "zotero"
+name = "Zotero"
+category = "office"
+processes = ["zotero.exe"]
+[[app.folder]]
+path = '{USERPROFILE}\Zotero'
+label = "Library"
+exclude = ["logs"]
+[[app.folder]]
+path = '{APPDATA}\Zotero'
+label = "Profile"
+exclude = ["Crash Reports", "cache2"]
+
+[[app]]
+id = "calibre"
+name = "calibre"
+category = "office"
+processes = ["calibre.exe"]
+note_en = "Settings only. The book library is a normal folder (usually 'Calibre Library')."
+note_de = "Nur die Einstellungen. Die Bibliothek ist ein normaler Ordner (meist „Calibre Library“)."
+[[app.folder]]
+path = '{APPDATA}\calibre'
+exclude = ["cache"]
+
+# ---------------------------------------------------------------- development
+
+[[app]]
+id = "vscode"
+name = "Visual Studio Code"
+category = "development"
+processes = ["code.exe"]
+note_en = "Settings, keyboard shortcuts, snippets and the list of extensions."
+note_de = "Einstellungen, Tastenkürzel, Snippets und die Liste der Erweiterungen."
+[[app.folder]]
+path = '{APPDATA}\Code\User'
+label = "Settings"
+exclude = ["workspaceStorage", "History", "globalStorage\\*.log"]
+[[app.folder]]
+path = '{USERPROFILE}\.vscode'
+label = "Extensions"
+only = ["extensions/extensions.json", "argv.json"]
+
+[[app]]
+id = "git"
+name = "Git"
+category = "development"
+note_en = "Global Git configuration (name, e-mail, aliases)."
+note_de = "Globale Git-Konfiguration (Name, E-Mail, Aliase)."
+[[app.folder]]
+path = '{USERPROFILE}'
+only = [".gitconfig", ".gitignore_global", ".gitattributes_global"]
+
+[[app]]
+id = "ssh"
+name = "SSH keys and configuration"
+name_de = "SSH-Schlüssel und -Konfiguration"
+category = "security"
+default = false
+note_en = "Private keys give access to servers. Please use an encrypted backup."
+note_de = "Private Schlüssel gewähren Zugang zu Servern. Bitte eine verschlüsselte Sicherung verwenden."
+[[app.folder]]
+path = '{USERPROFILE}\.ssh'
+
+[[app]]
+id = "windows-terminal"
+name = "Windows Terminal"
+category = "development"
+processes = ["windowsterminal.exe"]
+[[app.folder]]
+path = '{LOCALAPPDATA}\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState'
+only = ["settings.json", "state.json"]
+
+[[app]]
+id = "powershell-profile"
+name = "PowerShell profiles"
+name_de = "PowerShell-Profile"
+category = "development"
+[[app.folder]]
+path = '{DOCUMENTS}\PowerShell'
+label = "PowerShell"
+only = ["Microsoft.PowerShell_profile.ps1", "profile.ps1", "Microsoft.VSCode_profile.ps1"]
+[[app.folder]]
+path = '{DOCUMENTS}\WindowsPowerShell'
+label = "Windows PowerShell"
+only = ["Microsoft.PowerShell_profile.ps1", "profile.ps1"]
+
+[[app]]
+id = "jetbrains"
+name = "JetBrains IDEs"
+category = "development"
+note_en = "Settings of IntelliJ IDEA, PyCharm, Rider, WebStorm and other JetBrains IDEs."
+note_de = "Einstellungen von IntelliJ IDEA, PyCharm, Rider, WebStorm und anderen JetBrains-IDEs."
+[[app.folder]]
+path = '{APPDATA}\JetBrains'
+exclude = ["*\\log", "*\\system", "*\\tmp", "*\\plugins\\*\\lib"]
+
+[[app]]
+id = "notepadplusplus"
+name = "Notepad++"
+category = "development"
+processes = ["notepad++.exe"]
+[[app.folder]]
+path = '{APPDATA}\Notepad++'
+exclude = ["backup"]
+
+[[app]]
+id = "sublime-text"
+name = "Sublime Text"
+category = "development"
+processes = ["sublime_text.exe"]
+[[app.folder]]
+path = '{APPDATA}\Sublime Text'
+exclude = ["Cache", "Index", "Log"]
+
+[[app]]
+id = "npm"
+name = "npm configuration"
+name_de = "npm-Konfiguration"
+category = "development"
+default = false
+[[app.folder]]
+path = '{USERPROFILE}'
+only = [".npmrc", ".yarnrc", ".yarnrc.yml"]
+
+[[app]]
+id = "putty"
+name = "PuTTY"
+category = "development"
+processes = ["putty.exe"]
+note_en = "Saved sessions and host keys."
+note_de = "Gespeicherte Sitzungen und Host-Schlüssel."
+registry = ['HKCU\Software\SimonTatham\PuTTY']
+
+[[app]]
+id = "winscp"
+name = "WinSCP"
+category = "development"
+processes = ["winscp.exe"]
+registry = ['HKCU\Software\Martin Prikryl\WinSCP 2']
+[[app.folder]]
+path = '{APPDATA}'
+only = ["WinSCP.ini"]
+
+[[app]]
+id = "filezilla"
+name = "FileZilla"
+category = "development"
+processes = ["filezilla.exe"]
+[[app.folder]]
+path = '{APPDATA}\FileZilla'
+exclude = ["*.log"]
+
+# ---------------------------------------------------------------- media
+
+[[app]]
+id = "obs"
+name = "OBS Studio"
+category = "media"
+processes = ["obs64.exe", "obs32.exe"]
+note_en = "Scenes, profiles and settings."
+note_de = "Szenen, Profile und Einstellungen."
+[[app.folder]]
+path = '{APPDATA}\obs-studio'
+exclude = ["logs", "crashes", "updates", "profiler_data", "plugin_config\\obs-browser\\Cache", "plugin_config\\obs-browser\\GPUCache"]
+
+[[app]]
+id = "vlc"
+name = "VLC media player"
+category = "media"
+processes = ["vlc.exe"]
+[[app.folder]]
+path = '{APPDATA}\vlc'
+exclude = ["art", "*.dat"]
+
+[[app]]
+id = "foobar2000"
+name = "foobar2000"
+category = "media"
+processes = ["foobar2000.exe"]
+[[app.folder]]
+path = '{APPDATA}\foobar2000-v2'
+label = "foobar2000 v2"
+exclude = ["crash reports"]
+[[app.folder]]
+path = '{APPDATA}\foobar2000'
+label = "foobar2000"
+exclude = ["crash reports"]
+
+[[app]]
+id = "musicbee"
+name = "MusicBee"
+category = "media"
+processes = ["musicbee.exe"]
+[[app.folder]]
+path = '{APPDATA}\MusicBee'
+exclude = ["InternalCache", "Logs"]
+
+[[app]]
+id = "audacity"
+name = "Audacity"
+category = "media"
+processes = ["audacity.exe"]
+[[app.folder]]
+path = '{APPDATA}\audacity'
+exclude = ["SessionData"]
+
+[[app]]
+id = "gimp"
+name = "GIMP"
+category = "media"
+processes = ["gimp-2.10.exe", "gimp-3.0.exe", "gimp.exe"]
+[[app.folder]]
+path = '{APPDATA}\GIMP'
+exclude = ["*\\tmp", "*\\thumbnails"]
+
+[[app]]
+id = "paintdotnet"
+name = "Paint.NET"
+category = "media"
+processes = ["paintdotnet.exe"]
+registry = ['HKCU\Software\paint.net']
+[[app.folder]]
+path = '{DOCUMENTS}\paint.net App Files'
+
+[[app]]
+id = "irfanview"
+name = "IrfanView"
+category = "media"
+processes = ["i_view64.exe", "i_view32.exe"]
+[[app.folder]]
+path = '{APPDATA}\IrfanView'
+
+[[app]]
+id = "kodi"
+name = "Kodi"
+category = "media"
+processes = ["kodi.exe"]
+[[app.folder]]
+path = '{APPDATA}\Kodi'
+exclude = ["cache", "temp", "addons\\packages", "userdata\\Thumbnails"]
+
+[[app]]
+id = "sharex"
+name = "ShareX"
+category = "media"
+processes = ["sharex.exe"]
+[[app.folder]]
+path = '{DOCUMENTS}\ShareX'
+exclude = ["Logs", "Backup", "Screenshots"]
+
+[[app]]
+id = "greenshot"
+name = "Greenshot"
+category = "media"
+processes = ["greenshot.exe"]
+[[app.folder]]
+path = '{APPDATA}\Greenshot'
+exclude = ["*.log"]
+
+# ---------------------------------------------------------------- gaming
+
+[[app]]
+id = "saved-games"
+name = "Saved games"
+name_de = "Spielstände"
+category = "gaming"
+note_en = "The Windows 'Saved Games' folder and 'My Games' in Documents."
+note_de = "Der Windows-Ordner „Gespeicherte Spiele“ und „My Games“ in den Dokumenten."
+[[app.folder]]
+path = '{SAVEDGAMES}'
+label = "Saved Games"
+[[app.folder]]
+path = '{DOCUMENTS}\My Games'
+label = "My Games"
+
+[[app]]
+id = "steam"
+name = "Steam settings and cloud-less saves"
+name_de = "Steam-Einstellungen und lokale Spielstände"
+category = "gaming"
+processes = ["steam.exe"]
+note_en = "Per-user settings and local game data (userdata). Games themselves are downloaded again."
+note_de = "Benutzereinstellungen und lokale Spieldaten (userdata). Die Spiele selbst werden neu heruntergeladen."
+[[app.folder]]
+path = '{PROGRAMFILESX86}\Steam\userdata'
+label = "userdata"
+[[app.folder]]
+path = '{PROGRAMFILESX86}\Steam\config'
+label = "config"
+only = ["config.vdf", "loginusers.vdf"]
+
+[[app]]
+id = "minecraft"
+name = "Minecraft (Java Edition)"
+category = "gaming"
+processes = ["javaw.exe", "minecraft.exe"]
+note_en = "Worlds, resource packs, screenshots and options. Game files are downloaded again."
+note_de = "Welten, Ressourcenpakete, Screenshots und Optionen. Spieldateien werden neu heruntergeladen."
+[[app.folder]]
+path = '{APPDATA}\.minecraft'
+only = ["saves", "resourcepacks", "shaderpacks", "screenshots", "options.txt", "servers.dat", "launcher_profiles.json"]
+
+# ---------------------------------------------------------------- security
+
+[[app]]
+id = "keepass"
+name = "KeePass (settings)"
+name_de = "KeePass (Einstellungen)"
+category = "security"
+processes = ["keepass.exe"]
+note_en = "Settings and plugins configuration. Add your .kdbx database file as a folder."
+note_de = "Einstellungen. Die .kdbx-Datenbank bitte über ihren Ordner sichern."
+[[app.folder]]
+path = '{APPDATA}\KeePass'
+
+[[app]]
+id = "keepassxc"
+name = "KeePassXC (settings)"
+name_de = "KeePassXC (Einstellungen)"
+category = "security"
+processes = ["keepassxc.exe"]
+[[app.folder]]
+path = '{APPDATA}\KeePassXC'
+label = "Roaming"
+[[app.folder]]
+path = '{LOCALAPPDATA}\KeePassXC'
+label = "Local"
+
+# ---------------------------------------------------------------- utilities
+
+[[app]]
+id = "7zip"
+name = "7-Zip"
+category = "utilities"
+registry = ['HKCU\Software\7-Zip']
+
+[[app]]
+id = "winrar"
+name = "WinRAR"
+category = "utilities"
+processes = ["winrar.exe"]
+registry = ['HKCU\Software\WinRAR']
+[[app.folder]]
+path = '{APPDATA}\WinRAR'
+
+[[app]]
+id = "powertoys"
+name = "PowerToys"
+category = "utilities"
+processes = ["powertoys.exe"]
+[[app.folder]]
+path = '{LOCALAPPDATA}\Microsoft\PowerToys'
+exclude = ["Updates", "*Logs*", "*\\Logs", "*.log"]
+
+[[app]]
+id = "everything"
+name = "Everything"
+category = "utilities"
+processes = ["everything.exe"]
+note_en = "Settings, bookmarks and filters. The index is rebuilt automatically."
+note_de = "Einstellungen, Lesezeichen und Filter. Der Index wird automatisch neu aufgebaut."
+[[app.folder]]
+path = '{APPDATA}\Everything'
+exclude = ["*.db"]
+
+[[app]]
+id = "total-commander"
+name = "Total Commander"
+category = "utilities"
+processes = ["totalcmd64.exe", "totalcmd.exe"]
+[[app.folder]]
+path = '{APPDATA}\GHISLER'
+
+[[app]]
+id = "rainmeter"
+name = "Rainmeter"
+category = "utilities"
+processes = ["rainmeter.exe"]
+[[app.folder]]
+path = '{APPDATA}\Rainmeter'
+label = "Settings"
+[[app.folder]]
+path = '{DOCUMENTS}\Rainmeter'
+label = "Skins"
+
+[[app]]
+id = "ditto"
+name = "Ditto"
+category = "utilities"
+processes = ["ditto.exe"]
+[[app.folder]]
+path = '{APPDATA}\Ditto'
+
+[[app]]
+id = "autohotkey"
+name = "AutoHotkey scripts"
+name_de = "AutoHotkey-Skripte"
+category = "utilities"
+[[app.folder]]
+path = '{DOCUMENTS}\AutoHotkey'
+
+[[app]]
+id = "flux"
+name = "f.lux"
+category = "utilities"
+processes = ["flux.exe"]
+registry = ['HKCU\Software\Michael Herf\flux']
+
+# ---------------------------------------------------------------- windows
+
+[[app]]
+id = "windows-explorer"
+name = "Explorer options"
+name_de = "Explorer-Optionen"
+category = "windows"
+note_en = "File extensions, hidden files, Quick Access and similar view options."
+note_de = "Dateiendungen, versteckte Dateien, Schnellzugriff und ähnliche Ansichtsoptionen."
+registry = ['HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced']
+[[app.folder]]
+path = '{APPDATA}\Microsoft\Windows\Recent\AutomaticDestinations'
+label = "Quick Access"
+only = ["f01b4d95cf55d32a.automaticDestinations-ms"]
+
+[[app]]
+id = "windows-input"
+name = "Mouse, keyboard and keyboard layouts"
+name_de = "Maus, Tastatur und Tastaturlayouts"
+category = "windows"
+registry = ['HKCU\Control Panel\Mouse', 'HKCU\Control Panel\Keyboard', 'HKCU\Keyboard Layout\Preload', 'HKCU\Keyboard Layout\Substitutes', 'HKCU\Control Panel\International']
+
+[[app]]
+id = "windows-appearance"
+name = "Wallpaper, colours and themes"
+name_de = "Hintergrund, Farben und Designs"
+category = "windows"
+registry = ['HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize', 'HKCU\Control Panel\Colors']
+[[app.folder]]
+path = '{APPDATA}\Microsoft\Windows\Themes'
+label = "Themes"
+
+[[app]]
+id = "windows-environment"
+name = "Environment variables (user)"
+name_de = "Umgebungsvariablen (Benutzer)"
+category = "windows"
+registry = ['HKCU\Environment']
+
+[[app]]
+id = "windows-start-menu"
+name = "Start menu shortcuts and taskbar pins"
+name_de = "Startmenü-Verknüpfungen und angeheftete Taskleisten-Symbole"
+category = "windows"
+[[app.folder]]
+path = '{APPDATA}\Microsoft\Windows\Start Menu\Programs'
+label = "Start menu"
+[[app.folder]]
+path = '{APPDATA}\Microsoft\Internet Explorer\Quick Launch\User Pinned'
+label = "Taskbar pins"
+
+[[app]]
+id = "windows-fonts"
+name = "Fonts installed for the user"
+name_de = "Für den Benutzer installierte Schriftarten"
+category = "windows"
+registry = ['HKCU\Software\Microsoft\Windows NT\CurrentVersion\Fonts']
+[[app.folder]]
+path = '{LOCALAPPDATA}\Microsoft\Windows\Fonts'
+
+[[app]]
+id = "sticky-notes"
+name = "Sticky Notes"
+name_de = "Kurznotizen (Sticky Notes)"
+category = "windows"
+processes = ["microsoft.notes.exe"]
+[[app.folder]]
+path = '{LOCALAPPDATA}\Packages\Microsoft.MicrosoftStickyNotes_8wekyb3d8bbwe\LocalState'
+only = ["plum.sqlite", "plum.sqlite-shm", "plum.sqlite-wal"]
+
+[[app]]
+id = "windows-dictionary"
+name = "Spell-check dictionary"
+name_de = "Wörterbuch der Rechtschreibprüfung"
+category = "windows"
+[[app.folder]]
+path = '{APPDATA}\Microsoft\Spelling'

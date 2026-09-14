@@ -17,50 +17,67 @@ A calm, careful backup tool for Windows — written in Rust.
 </div>
 
 <p align="center">
-  <img src="docs/screenshots/overview.png" width="780" alt="AeternaVault main window in dark appearance, showing the folders to keep safe, the destination and the last backup">
+  <img src="docs/screenshots/backup-view.png" width="640" alt="AeternaVault main window: folders with a contents tree, application settings, destination with encryption switch, and automatic backups">
 </p>
 
-AeternaVault keeps copies of your folders the way a well-run archive keeps its
-collection: quietly, completely, and so that you can always check what is there.
-Every backup is an ordinary folder you can open in Explorer. Before anything is
-written, a preview shows exactly what will happen.
+AeternaVault keeps copies of your folders and application settings the way a
+well-run archive keeps its collection: quietly, completely, and so that you can
+always check what is there. Back up before setting up a new computer, restore
+afterwards, and your documents *and* your programs' settings are back in place.
 
 The interface speaks **English and German** and can be switched at any time.
 
 ## Features
 
-- **Simple by default.** On first start AeternaVault suggests your personal folders
-  (Desktop, Documents, Pictures, …) and a destination on a second drive. One click
-  on *Back up now* is enough.
+- **Simple by default.** On first start AeternaVault suggests your personal
+  folders, the settings of applications it finds, and a destination on a second
+  drive. One click on *Back up now* is enough.
+- **Application settings.** A catalog of more than 60 applications and Windows
+  settings — browsers, e-mail, editors, media and game saves, keyboard layouts,
+  Explorer options, fonts and more. Folders *and* registry settings (HKCU) are
+  kept and restored to the right place on another computer, even under a
+  different user name.
+- **Choose exactly what to keep.** Open any folder and tick or untick
+  sub-folders and single files.
+- **Encryption (optional).** Protect backups with a passphrase and a recovery key
+  (Argon2id + XChaCha20-Poly1305). File names, folder structure and contents are
+  unreadable without it — well suited for cloud folders. Unchanged files are
+  never uploaded twice.
+- **Automatic backups.** One switch: every day, every week, every few hours or at
+  sign-in. Runs quietly through the Windows Task Scheduler, without a window, and
+  makes up missed backups.
 - **Preview first (dry run).** See which files are new, changed, unchanged, no
-  longer present or skipped — with size, search and filters. Export the list as
-  text or CSV. The preview never writes anything.
-- **Incremental and complete.** Only new and changed files are copied; unchanged
-  files are hard-linked from the previous backup. Every backup folder still
-  contains everything and can be browsed or copied on its own.
-- **Verified.** A SHA-256 checksum is stored for every file and checked again when
-  restoring. Damaged files are reported, never silently restored.
-- **Safe restore.** Restore to the original locations or into another folder.
-  Choose whether existing files are replaced, kept, or kept only if newer.
-  Nothing is ever deleted.
-- **Sensible exclusions.** Links and junctions are not followed, OneDrive
-  online-only files are skipped, temporary files are ignored, and the backup
-  destination is never backed up into itself.
-- **Application data.** Suggestions for profiles and settings worth keeping
-  (Firefox, Thunderbird, Chrome, Edge, VS Code, …) and an overview of installed
-  programs.
-- **Dark and light.** Follows Windows or your own choice.
-- **Hand-editable.** All settings live in a commented TOML file.
-- **Scriptable.** A command line for the Task Scheduler and for automation.
+  longer present or skipped — with search, filters and export as text or CSV.
+  The preview never writes anything.
+- **Browsable backups.** Each backup is an ordinary folder:
+  `Backups\2026-09-14 20-00\Documents\…` — three clicks to your files.
+- **Incremental and verified.** Only new and changed files are copied; unchanged
+  ones are hard-linked. SHA-256 checksums are verified on restore.
+- **Safe restore.** Restore everything or only some folders and applications, to
+  the original locations or into another folder. Nothing is ever deleted.
+- **Ready for a new computer.** Every backup includes a list of installed
+  programs (and a `winget` export for reinstalling most of them at once).
+- **Considerate.** Warns when an application is open, skips OneDrive online-only
+  files, links and junctions, and never backs up the destination into itself.
+- **Hand-editable.** All settings live in a commented TOML file; the application
+  catalog can be extended with your own `apps.toml`.
 
 <table>
   <tr>
+    <td><img src="docs/screenshots/applications.png" alt="Applications view listing browsers, e-mail and development tools with sizes"></td>
+    <td><img src="docs/screenshots/encryption.png" alt="Dialog to set up encryption with a passphrase strength meter"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Application settings to keep</sub></td>
+    <td align="center"><sub>Setting up encryption</sub></td>
+  </tr>
+  <tr>
     <td><img src="docs/screenshots/preview.png" alt="Preview of a backup with filters for new, changed, unchanged and removed files"></td>
-    <td><img src="docs/screenshots/restore.png" alt="Restore view with a list of backups and the choice of target"></td>
+    <td><img src="docs/screenshots/restore.png" alt="Restore view with the choice of folders and applications"></td>
   </tr>
   <tr>
     <td align="center"><sub>Preview before every backup</sub></td>
-    <td align="center"><sub>Choosing a backup to restore</sub></td>
+    <td align="center"><sub>Choosing what to restore</sub></td>
   </tr>
   <tr>
     <td colspan="2"><img src="docs/screenshots/overview-de-light.png" alt="Main window in light appearance with German interface"></td>
@@ -91,33 +108,65 @@ Requirements: Windows 10 or 11, 64-bit.
 
 ### Back up
 
-1. Check the folders under **What is kept safe**. Add more with *Add folder…* or
-   by dragging folders onto the window.
-2. Check **Where it is kept** — ideally a second disk or an external drive.
-3. Click **Preview** to see what will happen, or **Back up now** to start after a
-   short confirmation.
+1. **What is kept safe** — tick your folders. Click the arrow next to a folder to
+   choose single sub-folders or files. Add more folders with *Add folder…* or by
+   dragging them onto the window.
+2. **Application settings** — *Choose applications…* shows everything found on
+   this computer. Close open applications before backing up for a consistent copy.
+3. **Where it is kept** — ideally a second disk, an external drive or a cloud
+   folder. Turn on **Encrypt backups** for cloud folders and sensitive data.
+4. Click **Preview** to see what will happen, or **Back up now**.
 
-### Restore
+### Automatic backups
 
-1. Open **Restore** and choose a backup.
-2. Choose *The original locations* or *Another folder*.
-3. Click **Preview** to see which files would be created or replaced, then
-   **Restore**.
+Turn on **Automatic backups** in the Backup view and choose how often. AeternaVault
+creates a task in the Windows Task Scheduler (`\AeternaVault\Automatic backup`)
+that runs `AeternaVault.exe backup --scheduled` — no window, low priority. If the
+destination drive is not connected, the run is skipped quietly; the result is
+shown the next time you open AeternaVault. Turning the switch off removes the task.
+
+Encrypted automatic backups need the passphrase to be remembered on the computer
+(it is protected with Windows DPAPI for your account only).
+
+### Moving to a new computer
+
+1. On the old computer: back up (folders and application settings).
+2. On the new computer: install the programs you need — `Applications\Installed
+   programs.txt` in the backup lists them, and `winget import -i
+   winget-packages.json` reinstalls most of them at once.
+3. Start AeternaVault, choose the same destination, open **Restore**, select the
+   backup and restore to *the original locations*. Application folders and
+   registry settings are adapted to the new user profile automatically.
+
+### Encryption
+
+- The passphrase is never stored. It unlocks a random vault key; a separate
+  **recovery key** (shown once when setting up) unlocks it as well.
+- Encrypted backups live in `<destination>\AeternaVault Encrypted\`. Please sync or
+  copy the whole folder; files are shared between backups.
+- To see the contents, open **Restore**, select the backup and **Unlock…**. Restore
+  into a folder to look at the files.
+- Details of the format: [docs/ENCRYPTION.md](docs/ENCRYPTION.md).
 
 ### What a backup looks like on disk
 
 ```text
 D:\AeternaVault\Backups\
-  YOUR-PC\
-    2026-09-12_143200\
-      snapshot.json      status, time, sources, statistics
-      files.json         every file with size, date and SHA-256
-      data\
-        Documents\...
-        Pictures\...
+  2026-09-12 14-32\
+    Documents\...
+    Pictures\...
+    Applications\
+      Firefox\...
+      Visual Studio Code\Settings\...
+      7-Zip\Registry\HKCU - Software - 7-Zip.reg
+      Installed programs.txt
+      winget-packages.json
+    .aeternavault\          (hidden: snapshot.json, files.json)
+  AeternaVault Encrypted\   (only if encryption is used)
 ```
 
-The folders can be opened and copied without AeternaVault.
+Plain backups can be opened and copied without AeternaVault; `.reg` files can be
+imported with a double-click.
 
 ### Command line
 
@@ -131,11 +180,8 @@ AeternaVault.exe restore latest --to D:\Restored --yes
 AeternaVault.exe paths                     # where settings and logs are stored
 ```
 
-A daily backup at 20:00 via the Windows Task Scheduler:
-
-```powershell
-schtasks /Create /SC DAILY /ST 20:00 /TN "AeternaVault backup" /TR "\"C:\Tools\AeternaVault.exe\" backup"
-```
+Encrypted backups use the key remembered on the computer, or the passphrase from
+the environment variable `AETERNAVAULT_PASSPHRASE`.
 
 Exit codes: `0` success, `1` error, `2` completed with notes or confirmation missing.
 
@@ -144,6 +190,9 @@ Exit codes: `0` success, `1` error, `2` completed with notes or confirmation mis
 | What | Where |
 |---|---|
 | Configuration | `%APPDATA%\AeternaVault\config.toml` |
+| Own application catalog entries | `%APPDATA%\AeternaVault\apps.toml` |
+| Remembered vault keys (DPAPI) | `%APPDATA%\AeternaVault\keys\` |
+| Result of the last automatic backup | `%APPDATA%\AeternaVault\state.json` |
 | Logs (14 days) | `%LOCALAPPDATA%\AeternaVault\logs\` |
 | Portable mode | put an `AeternaVault.toml` next to the EXE |
 | Custom location | set the environment variable `AETERNAVAULT_HOME` |
@@ -157,49 +206,76 @@ destination = 'D:\AeternaVault\Backups'
 mode = "incremental"       # or "full"
 exclude = ["Thumbs.db", "desktop.ini", "~$*", "*.tmp"]
 
+[encryption]
+enabled = false
+
+[schedule]
+enabled = true
+frequency = "daily"        # "daily", "weekly", "hourly", "at-logon"
+time = "20:00"
+weekday = "sunday"
+every_hours = 4
+catch_up = true
+only_on_ac_power = false
+
 [advanced]
 skip_online_only_files = true
 hardlink_unchanged = true
 confirm_before_start = true
 verify_on_restore = true
 restore_conflict = "replace-changed"   # "keep-existing", "keep-newer"
+save_program_list = true
 
 [[source]]
-name = "Documents"
-path = 'C:\Users\Anna\Documents'
+name = "Desktop"
+path = 'C:\Users\Anna\Desktop'
 enabled = true
+exclude_paths = ["Old screenshots"]
 
-[[source]]
-name = "Firefox profile"
-path = 'C:\Users\Anna\AppData\Roaming\Mozilla\Firefox'
-enabled = true
-exclude = ["Crash Reports", "parent.lock"]
+[[application]]
+id = "firefox"
+
+[[application]]
+id = "vscode"
+```
+
+Adding an application to the catalog (`apps.toml` next to `config.toml`):
+
+```toml
+[[app]]
+id = "my-tool"
+name = "My Tool"
+category = "utilities"
+processes = ["mytool.exe"]
+registry = ['HKCU\Software\My Company\My Tool']
+[[app.folder]]
+path = '{APPDATA}\My Tool'
+exclude = ["cache", "*.log"]
 ```
 
 ## Current limitations
 
-AeternaVault 0.1 is a young project. Please keep a second copy of data that
-matters to you.
+AeternaVault is a young project. Please keep a second copy of data that matters.
 
 - Files that another program locks exclusively (e.g. an open Outlook PST) are
   reported and skipped — Volume Shadow Copy support is planned.
-- Backups are not compressed or encrypted yet.
-- There is no built-in schedule or removal of old backups yet (use the Task
-  Scheduler for now).
-- Registry settings are not backed up yet.
+- Old backups are not removed automatically yet.
+- Browser passwords and some app databases are protected by the Windows account;
+  after a reinstall of Windows they may need the application's own sync.
+- Registry settings are limited to `HKEY_CURRENT_USER`.
 
 See the [roadmap](docs/ROADMAP.md) for what comes next.
 
 ## Building from source
 
-Requirements: [Rust](https://rustup.rs/) (stable) and, for the MSVC toolchain,
-the *Visual Studio Build Tools* with "Desktop development with C++".
+Requirements: [Rust](https://rustup.rs/) 1.88 or newer and, for the MSVC
+toolchain, the *Visual Studio Build Tools* with "Desktop development with C++".
 
 ```powershell
 git clone https://github.com/baba537/AeternaVault.git
 cd AeternaVault
 cargo run                      # debug build with console log
-cargo test
+cargo test                     # engine, encryption and interface tests
 cargo build --release          # target\release\AeternaVault.exe
 ```
 
@@ -219,8 +295,8 @@ Pushing a version tag builds and publishes `AeternaVault.exe`, a ZIP package
 and `SHA256SUMS.txt` via GitHub Actions:
 
 ```powershell
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 Code signing is prepared in `.github/workflows/release.yml` and activates when
@@ -233,19 +309,22 @@ are set.
 src/
   main.rs, cli.rs        entry point and command line
   config.rs, paths.rs    settings file and locations
+  state.rs               result of automatic backups
   i18n.rs                English and German texts
-  logging.rs, error.rs
-  engine/                scan, plan (preview), backup, restore, index format
-  platform/              Windows specifics, application discovery, VSS interface
-  gui/                   theme, widgets, background tasks, views
+  engine/                scan, selection, plan (preview), backup, restore,
+                         index format, encryption (crypto, vault)
+  platform/              Windows specifics, application catalog (apps.toml),
+                         registry, portable paths, Task Scheduler, VSS interface
+  gui/                   state, actions, dialogs, theme, widgets, views, tests
 assets/icon/             application icon (generated by tools/make-icon.ps1)
-docs/                    architecture, design concept, roadmap, screenshots
+docs/                    architecture, encryption, design, roadmap, screenshots
 .github/workflows/       CI and release
 ```
 
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md) — modules, data flow, preview guarantees, crate choices and alternatives
+- [Encryption](docs/ENCRYPTION.md) — how encrypted backups are stored and protected
 - [Design](docs/DESIGN.md) — colors, typography, layout, voice
 - [Roadmap](docs/ROADMAP.md) — ideas for the next versions
 - [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md)

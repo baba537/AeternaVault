@@ -7,22 +7,35 @@
 //! AeternaVault.exe restore latest --to D:\Restored --dry-run
 //! ```
 //!
+//! Encrypted backups use the key remembered on this computer, or the
+//! passphrase from the environment variable `AETERNAVAULT_PASSPHRASE`.
+//!
 //! Exit codes: 0 = success, 1 = error, 2 = completed with notes or
 //! confirmation (`--yes`) missing.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::config::{BackupMode, ConflictPolicy, Loaded};
+use crate::config::{BackupMode, Config, ConflictPolicy, Loaded};
+use crate::engine::crypto::VaultKey;
 use crate::engine::export::{self, ExportLabels};
 use crate::engine::manifest::SnapshotStatus;
-use crate::engine::plan::{self, ItemKind, Plan, RestoreOptions, RestoreTarget};
-use crate::engine::{CancelToken, backup, restore, snapshots};
+use crate::engine::plan::{self, BackupInput, ItemKind, Plan, RestoreOptions, RestoreTarget};
+use crate::engine::sources::Sources;
+use crate::engine::{CancelToken, backup, restore, snapshots, vault};
+use crate::error::EngineError;
 use crate::i18n::Lang;
 use crate::paths::AppPaths;
+use crate::platform::apps::Catalog;
+use crate::platform::known_paths::KnownPaths;
 use crate::platform::{self, vss::LiveFiles};
+use crate::state::{self, AutomaticOutcome, AutomaticRun, State};
+
+pub const PASSPHRASE_ENV: &str = "AETERNAVAULT_PASSPHRASE";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -38,7 +51,7 @@ pub struct Args {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// Back up all enabled sources using the saved configuration.
+    /// Back up all enabled folders and applications using the saved configuration.
     Backup {
         /// Only show what would be backed up; change nothing.
         #[arg(long)]
@@ -49,10 +62,13 @@ pub enum Command {
         /// Write the plan as CSV to this file.
         #[arg(long, value_name = "FILE")]
         csv: Option<PathBuf>,
+        /// Run quietly with low priority and record the result (used by automatic backups).
+        #[arg(long)]
+        scheduled: bool,
     },
     /// List the backups found at the destination.
     Snapshots,
-    /// Restore a backup: "latest", an ID such as 2026-09-14_143205, or COMPUTER/ID.
+    /// Restore a backup: "latest" or a name as shown by `snapshots`.
     Restore {
         snapshot: String,
         /// Restore into this folder instead of the original locations.
@@ -89,6 +105,18 @@ impl From<ConflictArg> for ConflictPolicy {
     }
 }
 
+/// The vault key from the remembered key file or `AETERNAVAULT_PASSPHRASE`.
+pub fn unattended_key(paths: &AppPaths, config: &Config) -> Option<VaultKey> {
+    let header = vault::read_header(&config.destination).ok()?;
+    if let Some(key) = vault::remembered_key(&state::key_dir(&paths.config_file), &header) {
+        return Some(key);
+    }
+    let passphrase = std::env::var(PASSPHRASE_ENV).ok()?;
+    vault::unlock(&config.destination, &passphrase)
+        .ok()
+        .map(|(_, key)| key)
+}
+
 pub fn run(command: Command, paths: &AppPaths, loaded: Loaded) -> ExitCode {
     // The command line always speaks English; the log file does as well.
     let lang = Lang::En;
@@ -111,41 +139,111 @@ pub fn run(command: Command, paths: &AppPaths, loaded: Loaded) -> ExitCode {
             ExitCode::SUCCESS
         }
 
-        Command::Snapshots => match snapshots::list(&config.destination) {
-            Ok(list) if list.is_empty() => {
-                println!("No backups found in {}", config.destination.display());
-                ExitCode::SUCCESS
-            }
-            Ok(list) => {
-                for s in list {
-                    let (status, files, size) = match &s.header {
-                        Some(h) => (
-                            lang.status(Some(h.status)),
-                            h.stats.files,
-                            lang.bytes(h.stats.bytes),
-                        ),
-                        None => (lang.status(None), 0, String::new()),
-                    };
-                    println!(
-                        "{:<40} {:<22} {:>10} files {:>10}",
-                        s.qualified_id(),
-                        status,
-                        files,
-                        size
-                    );
+        Command::Snapshots => {
+            let key = unattended_key(paths, &config);
+            match snapshots::list(&config.destination, key.as_ref()) {
+                Ok(list) if list.is_empty() => {
+                    println!("No backups found in {}", config.destination.display());
+                    ExitCode::SUCCESS
                 }
-                ExitCode::SUCCESS
+                Ok(list) => {
+                    for s in list {
+                        let (status, files, size) = match &s.header {
+                            Some(h) => (
+                                lang.status(Some(h.status)).to_string(),
+                                h.stats.files,
+                                lang.bytes(h.stats.bytes),
+                            ),
+                            None if s.is_locked() => {
+                                ("encrypted (locked)".to_string(), 0, String::new())
+                            }
+                            None => (lang.status(None).to_string(), 0, String::new()),
+                        };
+                        println!(
+                            "{:<44} {:<22} {:>10} files {:>10}",
+                            s.qualified_id(),
+                            status,
+                            files,
+                            size
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(err) => fail(&err),
             }
-            Err(err) => fail(&err),
-        },
+        }
 
-        Command::Backup { dry_run, full, csv } => {
+        Command::Backup {
+            dry_run,
+            full,
+            csv,
+            scheduled,
+        } => {
+            if scheduled {
+                platform::enter_background_mode();
+            }
             if full {
                 config.mode = BackupMode::Full;
             }
-            let plan = match plan::plan_backup(&config, &computer, &cancel, &mut quiet) {
+            let config_dir = paths
+                .config_file
+                .parent()
+                .map(PathBuf::from)
+                .unwrap_or_default();
+            let catalog = Catalog::load(&config_dir);
+            let sources = Sources::collect(
+                &config,
+                &catalog,
+                &KnownPaths::current(),
+                Lang::resolve(config.language),
+            );
+            let key = config
+                .encryption
+                .enabled
+                .then(|| unattended_key(paths, &config))
+                .flatten();
+
+            let record = |outcome: AutomaticOutcome, message: String, files: u64, bytes: u64| {
+                if scheduled {
+                    let mut state = State::load(&paths.config_file);
+                    state.last_automatic = Some(AutomaticRun {
+                        at: Utc::now(),
+                        outcome,
+                        message,
+                        files,
+                        bytes,
+                    });
+                    state.save(&paths.config_file);
+                }
+            };
+
+            let input = BackupInput {
+                config: &config,
+                sources: &sources,
+                computer: &computer,
+                key: key.as_ref(),
+                running_apps: Vec::new(),
+            };
+            let plan = match plan::plan_backup(&input, &cancel, &mut quiet) {
                 Ok(plan) => plan,
-                Err(err) => return fail(&err),
+                Err(err) => {
+                    let outcome = match err {
+                        EngineError::DestinationUnavailable(_) => {
+                            AutomaticOutcome::DestinationUnavailable
+                        }
+                        EngineError::Locked | EngineError::EncryptionNotSetUp => {
+                            AutomaticOutcome::NeedsPassphrase
+                        }
+                        _ => AutomaticOutcome::Failed,
+                    };
+                    record(outcome, err.to_string(), 0, 0);
+                    // An unplugged external drive is expected, not an error.
+                    if scheduled && outcome == AutomaticOutcome::DestinationUnavailable {
+                        tracing::info!("automatic backup skipped: {err}");
+                        return ExitCode::SUCCESS;
+                    }
+                    return fail(&err);
+                }
             };
             print_summary(&plan, lang, false);
             if let Some(path) = csv
@@ -157,14 +255,15 @@ pub fn run(command: Command, paths: &AppPaths, loaded: Loaded) -> ExitCode {
                 println!("Dry run: nothing was changed.");
                 return ExitCode::SUCCESS;
             }
-            match backup::run_backup(&plan, &LiveFiles, &cancel, &mut quiet) {
+            match backup::run_backup(&plan, key.as_ref(), &LiveFiles, &cancel, &mut quiet) {
                 Ok(report) => {
+                    let stats = &report.header.stats;
                     println!(
                         "{} -> {}",
                         lang.backup_result(
-                            report.header.stats.copied_files,
-                            report.header.stats.linked_files + report.header.stats.referenced_files,
-                            report.header.stats.bytes,
+                            stats.copied_files,
+                            stats.linked_files + stats.referenced_files,
+                            stats.bytes,
                             report.duration,
                         ),
                         report.snapshot_dir.display()
@@ -172,13 +271,32 @@ pub fn run(command: Command, paths: &AppPaths, loaded: Loaded) -> ExitCode {
                     for warning in &report.warnings {
                         println!("  note: {warning}");
                     }
-                    if report.header.status == SnapshotStatus::Complete {
+                    let complete = report.header.status == SnapshotStatus::Complete;
+                    record(
+                        if complete {
+                            AutomaticOutcome::Complete
+                        } else {
+                            AutomaticOutcome::CompleteWithNotes
+                        },
+                        report.warnings.first().cloned().unwrap_or_default(),
+                        stats.files,
+                        stats.bytes,
+                    );
+                    if complete {
                         ExitCode::SUCCESS
                     } else {
                         ExitCode::from(2)
                     }
                 }
-                Err(err) => fail(&err),
+                Err(err) => {
+                    let outcome = if matches!(err, EngineError::AlreadyRunning) {
+                        AutomaticOutcome::AlreadyRunning
+                    } else {
+                        AutomaticOutcome::Failed
+                    };
+                    record(outcome, err.to_string(), 0, 0);
+                    fail(&err)
+                }
             }
         }
 
@@ -189,18 +307,28 @@ pub fn run(command: Command, paths: &AppPaths, loaded: Loaded) -> ExitCode {
             yes,
             conflict,
         } => {
-            let info = match snapshots::find(&config.destination, &snapshot, &computer) {
-                Ok(info) => info,
-                Err(err) => return fail(&err),
-            };
+            let key = unattended_key(paths, &config);
+            let info =
+                match snapshots::find(&config.destination, &snapshot, &computer, key.as_ref()) {
+                    Ok(info) => info,
+                    Err(err) => return fail(&err),
+                };
             let options = RestoreOptions {
                 target: to
                     .map(RestoreTarget::Folder)
                     .unwrap_or(RestoreTarget::Original),
                 conflict: conflict.into(),
                 verify: config.advanced.verify_on_restore,
+                skip: HashSet::new(),
             };
-            let plan = match plan::plan_restore(&info, options, &cancel, &mut quiet) {
+            let plan = match plan::plan_restore(
+                &info,
+                options,
+                key.as_ref(),
+                Vec::new(),
+                &cancel,
+                &mut quiet,
+            ) {
                 Ok(plan) => plan,
                 Err(err) => return fail(&err),
             };
@@ -214,7 +342,7 @@ pub fn run(command: Command, paths: &AppPaths, loaded: Loaded) -> ExitCode {
                 println!("Add --yes to restore these files.");
                 return ExitCode::from(2);
             }
-            match restore::run_restore(&plan, &cancel, &mut quiet) {
+            match restore::run_restore(&plan, key.as_ref(), &cancel, &mut quiet) {
                 Ok(report) => {
                     println!(
                         "{}",

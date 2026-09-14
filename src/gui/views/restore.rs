@@ -1,13 +1,17 @@
-//! Restore view: pick a backup, pick a target, preview, restore.
+//! Restore view: pick a backup (unlocking encrypted ones), choose what to
+//! restore and where, preview, restore.
 
 use eframe::egui::{self, Align, CornerRadius, FontFamily, FontId, Layout, Sense, Ui};
 
 use super::status_color;
 use crate::config::{BackupMode, ConflictPolicy};
+use crate::engine::manifest::{APPS_DIR, PROGRAM_LIST_FILE};
+use crate::engine::snapshots::Location;
 use crate::error::EngineError;
-use crate::gui::AeternaApp;
 use crate::gui::theme::{SANS_STRONG, palette};
 use crate::gui::widgets::{self, ButtonKind};
+use crate::gui::{AeternaApp, AfterUnlock};
+use crate::platform;
 
 pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
@@ -20,6 +24,7 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
             ui.vertical(|ui| widgets::section_title(ui, t.restore_choose_title));
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                 if widgets::button(ui, ButtonKind::Quiet, t.refresh, true).clicked() {
+                    app.refresh_vault();
                     app.refresh_snapshots(&ctx);
                 }
             });
@@ -47,11 +52,11 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                         for info in list {
                             let id = info.qualified_id();
                             let selected = app.restore.selected.as_deref() == Some(id.as_str());
-                            let enabled = info.header.is_some();
+                            let selectable = info.header.is_some() || info.is_locked();
                             let width = ui.available_width();
                             let (rect, response) = ui.allocate_exact_size(
                                 egui::vec2(width, 50.0),
-                                if enabled {
+                                if selectable {
                                     Sense::click()
                                 } else {
                                     Sense::hover()
@@ -68,7 +73,7 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                                     CornerRadius::same(1),
                                     p.accent,
                                 );
-                            } else if response.hovered() && enabled {
+                            } else if response.hovered() && selectable {
                                 painter.rect_filled(
                                     rect,
                                     CornerRadius::same(4),
@@ -77,10 +82,15 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                             }
 
                             let status = info.header.as_ref().map(|h| h.status);
+                            let dot = if info.is_locked() {
+                                p.accent
+                            } else {
+                                status_color(&p, status)
+                            };
                             painter.circle_filled(
                                 egui::pos2(rect.left() + 18.0, rect.center().y),
                                 4.0,
-                                status_color(&p, status),
+                                dot,
                             );
 
                             let text_rect = egui::Rect::from_min_max(
@@ -107,6 +117,9 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                                         lang.files(h.stats.files),
                                         lang.bytes(h.stats.bytes)
                                     );
+                                    if h.encrypted {
+                                        detail.push_str(&format!(" · {}", t.encrypted_label));
+                                    }
                                     if !info.computer.eq_ignore_ascii_case(&app.computer) {
                                         detail.push_str(&format!(
                                             " · {}",
@@ -120,6 +133,9 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                                         detail,
                                     )
                                 }
+                                None if info.is_locked() => {
+                                    (info.id.clone(), t.locked_backup.to_string())
+                                }
                                 None => (info.id.clone(), lang.computer_label(&info.computer)),
                             };
                             widgets::paint_cell(
@@ -127,7 +143,7 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                                 text_rect,
                                 &title,
                                 FontId::new(15.0, FontFamily::Name(SANS_STRONG.into())),
-                                if enabled { p.text } else { p.text_secondary },
+                                if selectable { p.text } else { p.text_secondary },
                                 Align::Min,
                             );
                             widgets::paint_cell(
@@ -138,10 +154,15 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                                 p.text_secondary,
                                 Align::Min,
                             );
+                            let status_text = if info.is_locked() {
+                                t.selected_backup_locked
+                            } else {
+                                lang.status(status)
+                            };
                             widgets::paint_cell(
                                 ui,
                                 status_rect,
-                                lang.status(status),
+                                status_text,
                                 FontId::proportional(13.0),
                                 p.text_secondary,
                                 Align::Max,
@@ -155,11 +176,15 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
             }
         }
         if let Some(id) = clicked {
+            if app.restore.selected.as_deref() != Some(id.as_str()) {
+                app.restore.skip.clear();
+            }
             app.restore.selected = Some(id);
         }
     });
 
     ui.add_space(14.0);
+    what_to_restore(app, ui);
 
     widgets::card(ui, |ui| {
         widgets::section_title(ui, t.restore_target_title);
@@ -213,8 +238,112 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                 }
             });
     });
-
     ui.add_space(12.0);
+}
+
+/// Checkboxes for the folders and applications contained in the selected backup.
+fn what_to_restore(app: &mut AeternaApp, ui: &mut Ui) {
+    let t = app.lang.t();
+    let lang = app.lang;
+    let p = *palette(ui);
+    let Some(snapshot) = app.selected_snapshot().cloned() else {
+        return;
+    };
+    let Some(header) = snapshot.header.clone() else {
+        return;
+    };
+
+    widgets::card(ui, |ui| {
+        widgets::section_title(ui, t.restore_what_title);
+
+        let folders: Vec<_> = header
+            .sources
+            .iter()
+            .filter(|s| s.app.is_none() && !s.extra)
+            .collect();
+        if !folders.is_empty() {
+            widgets::secondary_text(ui, t.restore_folders);
+            ui.horizontal_wrapped(|ui| {
+                for source in folders {
+                    let mut on = !app.restore.skip.contains(&source.key);
+                    if ui.checkbox(&mut on, &source.name).changed() {
+                        if on {
+                            app.restore.skip.remove(&source.key);
+                        } else {
+                            app.restore.skip.insert(source.key.clone());
+                        }
+                    }
+                }
+            });
+            ui.add_space(6.0);
+        }
+
+        let mut app_ids: Vec<(String, String)> = header
+            .sources
+            .iter()
+            .filter_map(|s| s.app.clone())
+            .chain(header.registry.iter().map(|r| r.app.clone()))
+            .map(|id| {
+                let name = app
+                    .catalog
+                    .get(&id)
+                    .map(|a| a.display_name(lang).to_string())
+                    .or_else(|| {
+                        header
+                            .registry
+                            .iter()
+                            .find(|r| r.app == id)
+                            .map(|r| r.app_name.clone())
+                    })
+                    .unwrap_or_else(|| id.clone());
+                (id, name)
+            })
+            .collect();
+        app_ids.sort_by_key(|a| a.1.to_lowercase());
+        app_ids.dedup_by(|a, b| a.0 == b.0);
+
+        if !app_ids.is_empty() {
+            widgets::secondary_text(ui, t.apps_card_title);
+            ui.horizontal_wrapped(|ui| {
+                for (id, name) in &app_ids {
+                    let key = format!("app:{id}");
+                    let mut on = !app.restore.skip.contains(&key);
+                    let running = app
+                        .catalog
+                        .get(id)
+                        .is_some_and(|a| a.is_running(&app.running));
+                    let label = if running {
+                        egui::RichText::new(format!("{name} ({})", t.app_open)).color(p.warning)
+                    } else {
+                        egui::RichText::new(name.as_str())
+                    };
+                    if ui.checkbox(&mut on, label).changed() {
+                        if on {
+                            app.restore.skip.remove(&key);
+                        } else {
+                            app.restore.skip.insert(key);
+                        }
+                    }
+                }
+            });
+            if !header.registry.is_empty() && !app.restore.to_folder {
+                widgets::secondary_text(ui, t.restore_registry_note);
+            }
+        }
+
+        // The program list helps reinstalling on a new computer.
+        let has_list = header.sources.iter().any(|s| s.extra);
+        if has_list && let Location::Plain { dir, .. } = &snapshot.location {
+            let list = dir.join(APPS_DIR).join(PROGRAM_LIST_FILE);
+            if list.is_file() {
+                ui.add_space(6.0);
+                if widgets::button(ui, ButtonKind::Quiet, t.open_program_list, true).clicked() {
+                    platform::open_in_editor(&list);
+                }
+            }
+        }
+    });
+    ui.add_space(14.0);
 }
 
 /// Always-visible bar at the bottom: selected backup on the left, actions on the right.
@@ -224,18 +353,29 @@ pub fn action_bar(app: &mut AeternaApp, ui: &mut Ui) {
     let lang = app.lang;
 
     ui.horizontal(|ui| {
+        let selected = app.selected_snapshot().cloned();
         ui.vertical(|ui| {
             widgets::secondary_text(ui, t.restore_selected);
-            let selected = app
-                .selected_snapshot()
-                .and_then(|s| s.header.as_ref())
-                .map(|h| lang.weekday_date(h.started_at.with_timezone(&chrono::Local)));
-            ui.label(selected.unwrap_or_else(|| "—".to_string()));
+            let text = match &selected {
+                Some(s) => match &s.header {
+                    Some(h) => lang.weekday_date(h.started_at.with_timezone(&chrono::Local)),
+                    None => s.id.clone(),
+                },
+                None => "—".to_string(),
+            };
+            ui.label(text);
         });
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let locked = selected.as_ref().is_some_and(|s| s.is_locked());
+            if locked {
+                if widgets::button(ui, ButtonKind::Primary, t.unlock, !app.is_busy()).clicked() {
+                    app.open_unlock(AfterUnlock::RefreshSnapshots);
+                }
+                return;
+            }
             let ready = !app.is_busy()
-                && app.selected_snapshot().is_some_and(|s| s.header.is_some())
+                && selected.as_ref().is_some_and(|s| s.header.is_some())
                 && (!app.restore.to_folder || app.restore.folder.is_some());
             if widgets::button(ui, ButtonKind::Primary, t.restore, ready).clicked() {
                 app.plan_restore(&ctx, true);

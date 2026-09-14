@@ -17,6 +17,7 @@ mod i18n;
 mod logging;
 mod paths;
 mod platform;
+mod state;
 
 use std::process::ExitCode;
 

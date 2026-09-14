@@ -53,7 +53,7 @@ impl Lang {
         };
         let mut out = String::new();
         for (i, c) in digits.chars().enumerate() {
-            if i > 0 && (digits.len() - i) % 3 == 0 {
+            if i > 0 && (digits.len() - i).is_multiple_of(3) {
                 out.push(sep);
             }
             out.push(c);
@@ -320,6 +320,207 @@ impl Lang {
         }
     }
 
+    pub fn list_names(self, names: &[String]) -> String {
+        let and = match self {
+            Lang::En => "and",
+            Lang::De => "und",
+        };
+        match names {
+            [] => String::new(),
+            [one] => one.clone(),
+            [rest @ .., last] => format!("{} {and} {last}", rest.join(", ")),
+        }
+    }
+
+    pub fn apps_summary(self, count: usize, bytes: Option<u64>) -> String {
+        let apps = match (self, count) {
+            (Lang::En, 1) => "1 application".to_string(),
+            (Lang::En, n) => format!("{n} applications"),
+            (Lang::De, 1) => "1 Anwendung".to_string(),
+            (Lang::De, n) => format!("{n} Anwendungen"),
+        };
+        match bytes {
+            Some(bytes) => format!("{apps} · {}", self.bytes(bytes)),
+            None => apps,
+        }
+    }
+
+    pub fn more_items(self, n: usize) -> String {
+        match self {
+            Lang::En => format!("+{n} more"),
+            Lang::De => format!("+{n} weitere"),
+        }
+    }
+
+    pub fn running_warning(self, names: &[String]) -> String {
+        let list = self.list_names(names);
+        match (self, names.len()) {
+            (Lang::En, 1) => {
+                format!("{list} is open. Please close it for a complete, consistent copy.")
+            }
+            (Lang::En, _) => {
+                format!("{list} are open. Please close them for a complete, consistent copy.")
+            }
+            (Lang::De, 1) => format!(
+                "{list} ist geöffnet. Für eine vollständige, stimmige Kopie bitte schließen."
+            ),
+            (Lang::De, _) => format!(
+                "{list} sind geöffnet. Für eine vollständige, stimmige Kopie bitte schließen."
+            ),
+        }
+    }
+
+    pub fn close_before_restore(self, names: &[String]) -> String {
+        let list = self.list_names(names);
+        match self {
+            Lang::En => format!(
+                "Please close {list} before restoring, otherwise the settings may be overwritten again."
+            ),
+            Lang::De => format!(
+                "Bitte {list} vor dem Wiederherstellen schließen, sonst werden die Einstellungen womöglich wieder überschrieben."
+            ),
+        }
+    }
+
+    pub fn app_contents(self, folders: usize, registry_keys: usize) -> String {
+        let mut parts = Vec::new();
+        match (self, folders) {
+            (_, 0) => {}
+            (Lang::En, 1) => parts.push("1 folder".to_string()),
+            (Lang::En, n) => parts.push(format!("{n} folders")),
+            (Lang::De, 1) => parts.push("1 Ordner".to_string()),
+            (Lang::De, n) => parts.push(format!("{n} Ordner")),
+        }
+        match (self, registry_keys) {
+            (_, 0) => {}
+            (Lang::En, 1) => parts.push("1 registry key".to_string()),
+            (Lang::En, n) => parts.push(format!("{n} registry keys")),
+            (Lang::De, 1) => parts.push("1 Registry-Schlüssel".to_string()),
+            (Lang::De, n) => parts.push(format!("{n} Registry-Schlüssel")),
+        }
+        parts.join(" · ")
+    }
+
+    pub fn every_hours(self, hours: u8) -> String {
+        match self {
+            Lang::En => format!("every {hours} hours"),
+            Lang::De => format!("alle {hours} Stunden"),
+        }
+    }
+
+    pub fn next_backup(self, when: DateTime<Local>) -> String {
+        match self {
+            Lang::En => format!("Next backup: {}", self.upcoming_time(when)),
+            Lang::De => format!("Nächste Sicherung: {}", self.upcoming_time(when)),
+        }
+    }
+
+    fn upcoming_time(self, when: DateTime<Local>) -> String {
+        let days = (when.date_naive() - Local::now().date_naive()).num_days();
+        let clock = when.format("%H:%M");
+        match (self, days) {
+            (Lang::En, 0) => format!("today, {clock}"),
+            (Lang::En, 1) => format!("tomorrow, {clock}"),
+            (Lang::De, 0) => format!("heute, {clock}"),
+            (Lang::De, 1) => format!("morgen, {clock}"),
+            _ => self.weekday_date(when),
+        }
+    }
+
+    pub fn automatic_result(self, run: &crate::state::AutomaticRun) -> (bool, String) {
+        use crate::state::AutomaticOutcome as O;
+        let when = self.relative_time(run.at.with_timezone(&Local));
+        let ok = matches!(run.outcome, O::Complete | O::CompleteWithNotes);
+        let text = match (self, run.outcome) {
+            (Lang::En, O::Complete) => format!(
+                "The automatic backup ({when}) completed: {}, {}.",
+                self.files(run.files),
+                self.bytes(run.bytes)
+            ),
+            (Lang::De, O::Complete) => format!(
+                "Die automatische Sicherung ({when}) ist abgeschlossen: {}, {}.",
+                self.files(run.files),
+                self.bytes(run.bytes)
+            ),
+            (Lang::En, O::CompleteWithNotes) => format!(
+                "The automatic backup ({when}) completed with notes. Details are in the activity log."
+            ),
+            (Lang::De, O::CompleteWithNotes) => format!(
+                "Die automatische Sicherung ({when}) ist mit Hinweisen abgeschlossen. Details stehen im Protokoll."
+            ),
+            (Lang::En, O::DestinationUnavailable) => format!(
+                "The automatic backup ({when}) was skipped because the destination was not connected."
+            ),
+            (Lang::De, O::DestinationUnavailable) => format!(
+                "Die automatische Sicherung ({when}) wurde übersprungen, weil das Ziel nicht angeschlossen war."
+            ),
+            (Lang::En, O::NeedsPassphrase) => format!(
+                "The automatic backup ({when}) could not run: the passphrase is not remembered on this computer."
+            ),
+            (Lang::De, O::NeedsPassphrase) => format!(
+                "Die automatische Sicherung ({when}) konnte nicht laufen: Die Passphrase ist auf diesem Computer nicht gemerkt."
+            ),
+            (Lang::En, O::AlreadyRunning) => format!(
+                "The automatic backup ({when}) was skipped because another backup was running."
+            ),
+            (Lang::De, O::AlreadyRunning) => format!(
+                "Die automatische Sicherung ({when}) wurde übersprungen, weil schon eine andere Sicherung lief."
+            ),
+            (Lang::En, O::Failed) => format!(
+                "The automatic backup ({when}) did not complete: {}",
+                run.message
+            ),
+            (Lang::De, O::Failed) => format!(
+                "Die automatische Sicherung ({when}) wurde nicht abgeschlossen: {}",
+                run.message
+            ),
+        };
+        (ok, text)
+    }
+
+    pub fn last_automatic(self, run: &crate::state::AutomaticRun) -> String {
+        use crate::state::AutomaticOutcome as O;
+        let when = self.relative_time(run.at.with_timezone(&Local));
+        let status = match (self, run.outcome) {
+            (Lang::En, O::Complete) => "completed",
+            (Lang::De, O::Complete) => "abgeschlossen",
+            (Lang::En, O::CompleteWithNotes) => "completed with notes",
+            (Lang::De, O::CompleteWithNotes) => "mit Hinweisen abgeschlossen",
+            (Lang::En, O::DestinationUnavailable) => "skipped, destination not connected",
+            (Lang::De, O::DestinationUnavailable) => "übersprungen, Ziel nicht angeschlossen",
+            (Lang::En, O::NeedsPassphrase) => "passphrase needed",
+            (Lang::De, O::NeedsPassphrase) => "Passphrase benötigt",
+            (Lang::En, O::AlreadyRunning) => "skipped",
+            (Lang::De, O::AlreadyRunning) => "übersprungen",
+            (Lang::En, O::Failed) => "not completed",
+            (Lang::De, O::Failed) => "nicht abgeschlossen",
+        };
+        match self {
+            Lang::En => format!("Last automatic backup: {when} — {status}"),
+            Lang::De => format!("Letzte automatische Sicherung: {when} — {status}"),
+        }
+    }
+
+    pub fn registry_applied(self, n: u64) -> String {
+        match (self, n) {
+            (Lang::En, 1) => "1 registry key was applied.".to_string(),
+            (Lang::En, n) => format!("{n} registry keys were applied."),
+            (Lang::De, 1) => "1 Registry-Schlüssel wurde übernommen.".to_string(),
+            (Lang::De, n) => format!("{n} Registry-Schlüssel wurden übernommen."),
+        }
+    }
+
+    pub fn schedule_error(self, message: &str) -> String {
+        match self {
+            Lang::En => format!(
+                "The automatic backup could not be set up in the Windows Task Scheduler: {message}"
+            ),
+            Lang::De => format!(
+                "Die automatische Sicherung konnte nicht in der Windows-Aufgabenplanung eingerichtet werden: {message}"
+            ),
+        }
+    }
+
     pub fn kind_label(self, kind: ItemKind, restore: bool) -> &'static str {
         let t = self.t();
         match (kind, restore) {
@@ -417,6 +618,32 @@ impl Lang {
             ),
             (Lang::En, E::Cancelled) => "The operation was cancelled.".into(),
             (Lang::De, E::Cancelled) => "Der Vorgang wurde abgebrochen.".into(),
+            (Lang::En, E::Locked) => "The encrypted backups are locked. Please enter the passphrase.".into(),
+            (Lang::De, E::Locked) => {
+                "Die verschlüsselten Sicherungen sind gesperrt. Bitte die Passphrase eingeben.".into()
+            }
+            (Lang::En, E::EncryptionNotSetUp) => {
+                "Encryption is turned on, but no encrypted vault exists at this destination yet. Please set it up in the settings.".into()
+            }
+            (Lang::De, E::EncryptionNotSetUp) => {
+                "Die Verschlüsselung ist eingeschaltet, am Ziel gibt es aber noch keinen verschlüsselten Tresor. Bitte in den Einstellungen einrichten.".into()
+            }
+            (Lang::En, E::AlreadyRunning) => {
+                "Another backup is running for this destination at the moment. Please try again when it has finished.".into()
+            }
+            (Lang::De, E::AlreadyRunning) => {
+                "Für dieses Ziel läuft gerade schon eine Sicherung. Bitte versuche es erneut, wenn sie fertig ist.".into()
+            }
+            (Lang::En, E::Crypto(crate::engine::crypto::CryptoError::WrongKey)) => {
+                "The passphrase or recovery key is not correct.".into()
+            }
+            (Lang::De, E::Crypto(crate::engine::crypto::CryptoError::WrongKey)) => {
+                "Die Passphrase oder der Wiederherstellungsschlüssel ist nicht korrekt.".into()
+            }
+            (Lang::En, E::Crypto(err)) => format!("The encrypted data could not be processed: {err}."),
+            (Lang::De, E::Crypto(err)) => {
+                format!("Die verschlüsselten Daten konnten nicht verarbeitet werden: {err}.")
+            }
             (Lang::En, E::Io { context, source }) => {
                 format!("A file operation did not succeed: {context} ({source}).")
             }
@@ -451,7 +678,6 @@ pub struct Tr {
     pub sources_title: &'static str,
     pub sources_empty: &'static str,
     pub add_folder: &'static str,
-    pub suggestions: &'static str,
     pub remove_source: &'static str,
     pub source_missing: &'static str,
     pub calculating: &'static str,
@@ -557,11 +783,6 @@ pub struct Tr {
     pub to_overview: &'static str,
     pub open_backup_folder: &'static str,
 
-    pub apps_profiles_title: &'static str,
-    pub apps_profiles_hint: &'static str,
-    pub apps_profiles_none: &'static str,
-    pub add: &'static str,
-    pub in_list: &'static str,
     pub apps_installed_title: &'static str,
     pub apps_installed_hint: &'static str,
     pub search: &'static str,
@@ -593,6 +814,86 @@ pub struct Tr {
     pub activity_empty: &'static str,
     pub unexpected_problem: &'static str,
     pub csv_columns: [&'static str; 5],
+
+    // --- 0.2: application settings -------------------------------------------
+    pub apps_card_title: &'static str,
+    pub apps_card_empty: &'static str,
+    pub choose_apps: &'static str,
+    pub apps_hint: &'static str,
+    pub select_all_found: &'static str,
+    pub show_not_found: &'static str,
+    pub not_found: &'static str,
+    pub app_open: &'static str,
+    pub no_matches: &'static str,
+    pub categories: [&'static str; 10],
+
+    // --- 0.2: folder tree -----------------------------------------------------
+    pub select_all: &'static str,
+    pub select_none: &'static str,
+    pub partial_selection: &'static str,
+    pub choose_contents: &'static str,
+    pub folder_empty: &'static str,
+
+    // --- 0.2: encryption -------------------------------------------------------
+    pub encrypt_backups: &'static str,
+    pub encrypt_hint_on: &'static str,
+    pub encrypt_hint_off: &'static str,
+    pub encryption_disabled_note: &'static str,
+    pub enc_create_title: &'static str,
+    pub enc_create_hint: &'static str,
+    pub passphrase: &'static str,
+    pub passphrase_repeat: &'static str,
+    pub strength: [&'static str; 5],
+    pub passphrases_differ: &'static str,
+    pub passphrase_too_weak: &'static str,
+    pub remember_on_computer: &'static str,
+    pub enc_warning: &'static str,
+    pub set_up: &'static str,
+    pub recovery_title: &'static str,
+    pub recovery_hint: &'static str,
+    pub copy: &'static str,
+    pub recovery_confirm: &'static str,
+    pub done: &'static str,
+    pub unlock_title: &'static str,
+    pub unlock_hint: &'static str,
+    pub unlock: &'static str,
+    pub wrong_passphrase: &'static str,
+    pub change_title: &'static str,
+    pub change_hint: &'static str,
+    pub new_passphrase: &'static str,
+    pub save: &'static str,
+    pub passphrase_changed: &'static str,
+    pub enc_settings_title: &'static str,
+    pub enc_status_on: &'static str,
+    pub enc_status_off: &'static str,
+    pub change_passphrase: &'static str,
+    pub lock_now: &'static str,
+    pub encrypted_label: &'static str,
+    pub locked_backup: &'static str,
+
+    // --- 0.2: automatic backups ------------------------------------------------
+    pub schedule_title: &'static str,
+    pub schedule_hint: &'static str,
+    pub freq_daily: &'static str,
+    pub freq_weekly: &'static str,
+    pub freq_hourly: &'static str,
+    pub freq_logon: &'static str,
+    pub at_time: &'static str,
+    pub on_day: &'static str,
+    pub weekdays: [&'static str; 7],
+    pub catch_up: &'static str,
+    pub only_ac: &'static str,
+    pub logon_hint: &'static str,
+    pub schedule_needs_key: &'static str,
+    pub remember_now: &'static str,
+
+    // --- 0.2: restore ------------------------------------------------------------
+    pub restore_what_title: &'static str,
+    pub restore_folders: &'static str,
+    pub restore_registry_note: &'static str,
+    pub open_program_list: &'static str,
+    pub adv_program_list: &'static str,
+    pub selected_backup_locked: &'static str,
 }
 
 pub static EN: Tr = Tr {
@@ -611,7 +912,6 @@ pub static EN: Tr = Tr {
     sources_title: "What is kept safe",
     sources_empty: "No folders selected yet. Add the folders you would like to keep safe.",
     add_folder: "Add folder…",
-    suggestions: "Suggestions from applications",
     remove_source: "Remove from the list (nothing is deleted)",
     source_missing: "folder not found",
     calculating: "calculating…",
@@ -717,13 +1017,8 @@ pub static EN: Tr = Tr {
     to_overview: "Back to overview",
     open_backup_folder: "Open backup folder",
 
-    apps_profiles_title: "Application data worth keeping",
-    apps_profiles_hint: "Profiles and settings of applications found on this computer.",
-    apps_profiles_none: "No known application data was found.",
-    add: "Add",
-    in_list: "In the list",
     apps_installed_title: "Installed applications",
-    apps_installed_hint: "An overview for orientation. Program settings stored in the registry are not backed up yet.",
+    apps_installed_hint: "A list of these programs is saved with every backup, as a checklist for reinstalling on a new computer.",
     search: "Search…",
     open_install_folder: "Open install folder",
 
@@ -753,6 +1048,100 @@ pub static EN: Tr = Tr {
     activity_empty: "Nothing has happened yet.",
     unexpected_problem: "An unexpected problem occurred. Details are in the activity log.",
     csv_columns: ["status", "source", "path", "size_bytes", "note"],
+
+    apps_card_title: "Application settings",
+    apps_card_empty: "No applications chosen yet.",
+    choose_apps: "Choose applications…",
+    apps_hint: "Choose which settings are kept. On a new computer they are put back in the right place, even under a different user name.",
+    select_all_found: "Select all found",
+    show_not_found: "Also show applications that are not installed",
+    not_found: "not found on this computer",
+    app_open: "open",
+    no_matches: "Nothing matches the search.",
+    categories: [
+        "Browsers",
+        "E-mail",
+        "Communication",
+        "Office and notes",
+        "Development",
+        "Photo, video and music",
+        "Games",
+        "Passwords and keys",
+        "Utilities",
+        "Windows settings",
+    ],
+
+    select_all: "Select all",
+    select_none: "Select none",
+    partial_selection: "Only the checked items are kept.",
+    choose_contents: "Choose what to keep from this folder",
+    folder_empty: "This folder is empty.",
+
+    encrypt_backups: "Encrypt backups",
+    encrypt_hint_on: "Protected with your passphrase. File names and contents cannot be read without it.",
+    encrypt_hint_off: "Recommended for cloud folders and sensitive data.",
+    encryption_disabled_note: "New backups are no longer encrypted. Existing encrypted backups stay protected.",
+    enc_create_title: "Set up encryption",
+    enc_create_hint: "Choose a passphrase. A few unrelated words are easy to remember and hard to guess.",
+    passphrase: "Passphrase",
+    passphrase_repeat: "Repeat passphrase",
+    strength: ["Too short", "Weak", "Fair", "Good", "Strong"],
+    passphrases_differ: "The two passphrases are different.",
+    passphrase_too_weak: "Please use at least 10 characters.",
+    remember_on_computer: "Remember on this computer (needed for automatic backups)",
+    enc_warning: "Without the passphrase or the recovery key, nobody can restore these backups — not even you.",
+    set_up: "Set up",
+    recovery_title: "Your recovery key",
+    recovery_hint: "If you ever forget the passphrase, this key unlocks your backups. Write it down or print it and keep it in a safe place. It is shown only now.",
+    copy: "Copy",
+    recovery_confirm: "I have kept the recovery key in a safe place",
+    done: "Done",
+    unlock_title: "Unlock encrypted backups",
+    unlock_hint: "Enter the passphrase or the recovery key.",
+    unlock: "Unlock…",
+    wrong_passphrase: "That did not work. Please check the passphrase or recovery key.",
+    change_title: "Change passphrase",
+    change_hint: "Existing backups stay readable, and the recovery key stays valid.",
+    new_passphrase: "New passphrase",
+    save: "Save",
+    passphrase_changed: "The passphrase was changed.",
+    enc_settings_title: "Encryption",
+    enc_status_on: "Backups to this destination are encrypted.",
+    enc_status_off: "Backups are not encrypted. Encryption can be turned on in the Backup view.",
+    change_passphrase: "Change passphrase…",
+    lock_now: "Lock now",
+    encrypted_label: "encrypted",
+    locked_backup: "Encrypted — unlock to see the details",
+
+    schedule_title: "Automatic backups",
+    schedule_hint: "Backups run quietly in the background, without a window. Missed backups are made up as soon as the computer is on again.",
+    freq_daily: "Every day",
+    freq_weekly: "Every week",
+    freq_hourly: "Every few hours",
+    freq_logon: "When I sign in",
+    at_time: "at",
+    on_day: "on",
+    weekdays: [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ],
+    catch_up: "Make up missed backups",
+    only_ac: "Only when plugged in (laptops)",
+    logon_hint: "About five minutes after signing in to Windows.",
+    schedule_needs_key: "Encrypted automatic backups need the passphrase to be remembered on this computer.",
+    remember_now: "Remember…",
+
+    restore_what_title: "What to restore",
+    restore_folders: "Folders",
+    restore_registry_note: "Registry settings are applied to your current Windows account.",
+    open_program_list: "Open list of installed programs",
+    adv_program_list: "Save a list of installed programs with every backup",
+    selected_backup_locked: "Locked",
 };
 
 pub static DE: Tr = Tr {
@@ -771,7 +1160,6 @@ pub static DE: Tr = Tr {
     sources_title: "Was bewahrt wird",
     sources_empty: "Noch keine Ordner ausgewählt. Füge die Ordner hinzu, die bewahrt werden sollen.",
     add_folder: "Ordner hinzufügen…",
-    suggestions: "Vorschläge aus Anwendungen",
     remove_source: "Aus der Liste entfernen (es wird nichts gelöscht)",
     source_missing: "Ordner nicht gefunden",
     calculating: "wird berechnet…",
@@ -877,13 +1265,8 @@ pub static DE: Tr = Tr {
     to_overview: "Zur Übersicht",
     open_backup_folder: "Sicherungsordner öffnen",
 
-    apps_profiles_title: "Anwendungsdaten, die sich zu bewahren lohnen",
-    apps_profiles_hint: "Profile und Einstellungen von Anwendungen, die auf diesem Computer gefunden wurden.",
-    apps_profiles_none: "Es wurden keine bekannten Anwendungsdaten gefunden.",
-    add: "Hinzufügen",
-    in_list: "In der Liste",
     apps_installed_title: "Installierte Anwendungen",
-    apps_installed_hint: "Eine Übersicht zur Orientierung. Programmeinstellungen aus der Registry werden noch nicht gesichert.",
+    apps_installed_hint: "Mit jeder Sicherung wird eine Liste dieser Programme gespeichert – als Checkliste für die Neuinstallation auf einem neuen Computer.",
     search: "Suchen…",
     open_install_folder: "Installationsordner öffnen",
 
@@ -913,6 +1296,100 @@ pub static DE: Tr = Tr {
     activity_empty: "Bisher ist nichts geschehen.",
     unexpected_problem: "Ein unerwartetes Problem ist aufgetreten. Details stehen im Protokoll.",
     csv_columns: ["status", "quelle", "pfad", "groesse_bytes", "hinweis"],
+
+    apps_card_title: "Anwendungseinstellungen",
+    apps_card_empty: "Noch keine Anwendungen ausgewählt.",
+    choose_apps: "Anwendungen auswählen…",
+    apps_hint: "Wähle aus, welche Einstellungen bewahrt werden. Auf einem neuen Computer landen sie wieder am richtigen Ort, auch unter einem anderen Benutzernamen.",
+    select_all_found: "Alle gefundenen auswählen",
+    show_not_found: "Auch nicht installierte Anwendungen zeigen",
+    not_found: "auf diesem Computer nicht gefunden",
+    app_open: "geöffnet",
+    no_matches: "Nichts passt zur Suche.",
+    categories: [
+        "Browser",
+        "E-Mail",
+        "Kommunikation",
+        "Büro und Notizen",
+        "Entwicklung",
+        "Foto, Video und Musik",
+        "Spiele",
+        "Passwörter und Schlüssel",
+        "Werkzeuge",
+        "Windows-Einstellungen",
+    ],
+
+    select_all: "Alles auswählen",
+    select_none: "Nichts auswählen",
+    partial_selection: "Nur die angehakten Einträge werden bewahrt.",
+    choose_contents: "Auswählen, was aus diesem Ordner bewahrt wird",
+    folder_empty: "Dieser Ordner ist leer.",
+
+    encrypt_backups: "Sicherungen verschlüsseln",
+    encrypt_hint_on: "Mit deiner Passphrase geschützt. Dateinamen und Inhalte sind ohne sie nicht lesbar.",
+    encrypt_hint_off: "Empfohlen für Cloud-Ordner und sensible Daten.",
+    encryption_disabled_note: "Neue Sicherungen werden nicht mehr verschlüsselt. Bestehende verschlüsselte Sicherungen bleiben geschützt.",
+    enc_create_title: "Verschlüsselung einrichten",
+    enc_create_hint: "Wähle eine Passphrase. Ein paar Wörter, die nichts miteinander zu tun haben, sind leicht zu merken und schwer zu erraten.",
+    passphrase: "Passphrase",
+    passphrase_repeat: "Passphrase wiederholen",
+    strength: ["Zu kurz", "Schwach", "Mittel", "Gut", "Stark"],
+    passphrases_differ: "Die beiden Passphrasen unterscheiden sich.",
+    passphrase_too_weak: "Bitte mindestens 10 Zeichen verwenden.",
+    remember_on_computer: "Auf diesem Computer merken (nötig für automatische Sicherungen)",
+    enc_warning: "Ohne Passphrase oder Wiederherstellungsschlüssel kann niemand diese Sicherungen wiederherstellen – auch du nicht.",
+    set_up: "Einrichten",
+    recovery_title: "Dein Wiederherstellungsschlüssel",
+    recovery_hint: "Falls du die Passphrase einmal vergisst, entsperrt dieser Schlüssel deine Sicherungen. Schreibe ihn auf oder drucke ihn aus und bewahre ihn sicher auf. Er wird nur jetzt angezeigt.",
+    copy: "Kopieren",
+    recovery_confirm: "Ich habe den Wiederherstellungsschlüssel sicher aufbewahrt",
+    done: "Fertig",
+    unlock_title: "Verschlüsselte Sicherungen entsperren",
+    unlock_hint: "Gib die Passphrase oder den Wiederherstellungsschlüssel ein.",
+    unlock: "Entsperren…",
+    wrong_passphrase: "Das hat nicht geklappt. Bitte prüfe Passphrase oder Wiederherstellungsschlüssel.",
+    change_title: "Passphrase ändern",
+    change_hint: "Bestehende Sicherungen bleiben lesbar, und der Wiederherstellungsschlüssel bleibt gültig.",
+    new_passphrase: "Neue Passphrase",
+    save: "Speichern",
+    passphrase_changed: "Die Passphrase wurde geändert.",
+    enc_settings_title: "Verschlüsselung",
+    enc_status_on: "Sicherungen an dieses Ziel werden verschlüsselt.",
+    enc_status_off: "Sicherungen werden nicht verschlüsselt. Die Verschlüsselung lässt sich in der Ansicht „Sichern“ einschalten.",
+    change_passphrase: "Passphrase ändern…",
+    lock_now: "Jetzt sperren",
+    encrypted_label: "verschlüsselt",
+    locked_backup: "Verschlüsselt – entsperren, um Details zu sehen",
+
+    schedule_title: "Automatische Sicherungen",
+    schedule_hint: "Sicherungen laufen leise im Hintergrund, ohne Fenster. Verpasste Sicherungen werden nachgeholt, sobald der Computer wieder an ist.",
+    freq_daily: "Jeden Tag",
+    freq_weekly: "Jede Woche",
+    freq_hourly: "Alle paar Stunden",
+    freq_logon: "Bei jeder Anmeldung",
+    at_time: "um",
+    on_day: "am",
+    weekdays: [
+        "Montag",
+        "Dienstag",
+        "Mittwoch",
+        "Donnerstag",
+        "Freitag",
+        "Samstag",
+        "Sonntag",
+    ],
+    catch_up: "Verpasste Sicherungen nachholen",
+    only_ac: "Nur mit Netzteil (Laptops)",
+    logon_hint: "Etwa fünf Minuten nach der Anmeldung bei Windows.",
+    schedule_needs_key: "Verschlüsselte automatische Sicherungen brauchen die auf diesem Computer gemerkte Passphrase.",
+    remember_now: "Merken…",
+
+    restore_what_title: "Was wiederhergestellt wird",
+    restore_folders: "Ordner",
+    restore_registry_note: "Registry-Einstellungen werden für dein aktuelles Windows-Konto übernommen.",
+    open_program_list: "Liste der installierten Programme öffnen",
+    adv_program_list: "Mit jeder Sicherung eine Liste der installierten Programme speichern",
+    selected_backup_locked: "Gesperrt",
 };
 
 #[cfg(test)]

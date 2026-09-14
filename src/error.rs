@@ -40,6 +40,18 @@ pub enum EngineError {
     #[error("the operation was cancelled")]
     Cancelled,
 
+    #[error("the encrypted backups are locked; a passphrase is needed")]
+    Locked,
+
+    #[error("encryption is turned on but no encrypted vault exists at the destination")]
+    EncryptionNotSetUp,
+
+    #[error("another backup is already running for this destination")]
+    AlreadyRunning,
+
+    #[error("{0}")]
+    Crypto(#[from] crate::engine::crypto::CryptoError),
+
     #[error("{context}: {source}")]
     Io {
         context: String,

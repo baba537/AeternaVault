@@ -2,29 +2,94 @@
 
 use std::path::{Path, PathBuf};
 
-use super::manifest::{self, HEADER_FILE, SnapshotHeader};
+use super::crypto::VaultKey;
+use super::manifest::{self, FileIndex, HEADER_FILE, META_DIR, SnapshotHeader};
+use super::vault;
 use crate::error::{EngineError, EngineResult};
+
+#[derive(Debug, Clone)]
+pub enum Location {
+    /// AeternaVault 0.1: `<destination>\<COMPUTER>\<id>\`.
+    Legacy { dir: PathBuf, computer_dir: PathBuf },
+    /// `<destination>\<id>\` with a hidden `.aeternavault` folder.
+    Plain { dir: PathBuf, destination: PathBuf },
+    /// `<destination>\AeternaVault Encrypted\snapshots\<id>.avs`.
+    Encrypted { file: PathBuf, destination: PathBuf },
+}
 
 #[derive(Debug, Clone)]
 pub struct SnapshotInfo {
     pub id: String,
     pub computer: String,
-    pub dir: PathBuf,
-    pub computer_dir: PathBuf,
-    /// `None` if the backup never finished (no `snapshot.json`) or the header is damaged.
+    pub location: Location,
+    /// `None` if the backup is unfinished, damaged, or encrypted and locked.
     pub header: Option<SnapshotHeader>,
 }
 
 impl SnapshotInfo {
-    /// Unique across computers: `COMPUTER/2026-09-14_143205`.
+    /// Unique within a destination.
     pub fn qualified_id(&self) -> String {
-        format!("{}/{}", self.computer, self.id)
+        match &self.location {
+            Location::Legacy { .. } => format!("{}/{}", self.computer, self.id),
+            Location::Plain { .. } => self.id.clone(),
+            Location::Encrypted { .. } => format!("encrypted/{}", self.id),
+        }
+    }
+
+    pub fn is_encrypted(&self) -> bool {
+        matches!(self.location, Location::Encrypted { .. })
+    }
+
+    pub fn is_locked(&self) -> bool {
+        self.is_encrypted() && self.header.is_none()
     }
 
     pub fn is_usable_base(&self) -> bool {
         self.header
             .as_ref()
             .is_some_and(|h| h.status.is_usable_base())
+    }
+
+    /// Folder that plain `blob` paths are relative to.
+    pub fn blob_root(&self) -> Option<&Path> {
+        match &self.location {
+            Location::Legacy { computer_dir, .. } => Some(computer_dir),
+            Location::Plain { destination, .. } => Some(destination),
+            Location::Encrypted { .. } => None,
+        }
+    }
+
+    pub fn destination(&self) -> PathBuf {
+        match &self.location {
+            Location::Legacy { computer_dir, .. } => computer_dir
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+            Location::Plain { destination, .. } | Location::Encrypted { destination, .. } => {
+                destination.clone()
+            }
+        }
+    }
+
+    pub fn load_index(&self, key: Option<&VaultKey>) -> EngineResult<FileIndex> {
+        match &self.location {
+            Location::Legacy { dir, .. } => manifest::read_index(dir),
+            Location::Plain { dir, .. } => manifest::read_index(&dir.join(META_DIR)),
+            Location::Encrypted { file, .. } => {
+                let key = key.ok_or(EngineError::Locked)?;
+                Ok(manifest::read_encrypted(file, key)?.index)
+            }
+        }
+    }
+
+    fn sort_key(&self) -> String {
+        let digits: String = self
+            .id
+            .chars()
+            .filter(char::is_ascii_digit)
+            .take(14)
+            .collect();
+        format!("{digits:0<14}")
     }
 }
 
@@ -36,8 +101,9 @@ pub fn destination_reachable(destination: &Path) -> bool {
         .any(|p| !p.as_os_str().is_empty() && p.exists())
 }
 
-/// All snapshots below `destination`, newest first.
-pub fn list(destination: &Path) -> EngineResult<Vec<SnapshotInfo>> {
+/// All snapshots below `destination`, newest first. Encrypted snapshots are
+/// only described in detail when `key` unlocks them.
+pub fn list(destination: &Path, key: Option<&VaultKey>) -> EngineResult<Vec<SnapshotInfo>> {
     if destination.as_os_str().is_empty() {
         return Err(EngineError::NoDestination);
     }
@@ -46,95 +112,220 @@ pub fn list(destination: &Path) -> EngineResult<Vec<SnapshotInfo>> {
             destination.to_path_buf(),
         ));
     }
-    let Ok(computers) = std::fs::read_dir(destination) else {
+    let Ok(entries) = std::fs::read_dir(destination) else {
         return Ok(Vec::new());
     };
 
     let mut snapshots = Vec::new();
-    for computer_entry in computers.flatten() {
-        let computer_dir = computer_entry.path();
-        if !computer_dir.is_dir() {
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
             continue;
         }
-        let Ok(children) = std::fs::read_dir(&computer_dir) else {
-            continue;
-        };
-        for child in children.flatten() {
-            let dir = child.path();
-            let id = child.file_name().to_string_lossy().into_owned();
-            if !dir.is_dir() || !looks_like_snapshot_id(&id) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+
+        if name == vault::VAULT_DIR {
+            list_encrypted(destination, key, &mut snapshots);
+        } else if looks_like_snapshot_id(&name) {
+            let meta = dir.join(META_DIR);
+            if !meta.is_dir() {
                 continue;
             }
-            let header = if dir.join(HEADER_FILE).is_file() {
-                manifest::read_header(&dir)
-                    .inspect_err(|e| tracing::warn!("{e}"))
-                    .ok()
-            } else {
-                None
-            };
+            let header = meta
+                .join(HEADER_FILE)
+                .is_file()
+                .then(|| {
+                    manifest::read_header(&meta)
+                        .inspect_err(|e| tracing::warn!("{e}"))
+                        .ok()
+                })
+                .flatten();
+            let computer = header
+                .as_ref()
+                .map(|h| h.computer.clone())
+                .or_else(|| computer_suffix(&name))
+                .unwrap_or_default();
             snapshots.push(SnapshotInfo {
-                id,
-                computer: computer_entry.file_name().to_string_lossy().into_owned(),
-                dir,
-                computer_dir: computer_dir.clone(),
+                id: name,
+                computer,
+                location: Location::Plain {
+                    dir,
+                    destination: destination.to_path_buf(),
+                },
                 header,
             });
+        } else {
+            list_legacy(&dir, &name, &mut snapshots);
         }
     }
 
-    // IDs are timestamps, so sorting them sorts chronologically.
-    snapshots.sort_by(|a, b| b.id.cmp(&a.id).then_with(|| a.computer.cmp(&b.computer)));
+    snapshots.sort_by(|a, b| {
+        b.sort_key()
+            .cmp(&a.sort_key())
+            .then_with(|| a.computer.cmp(&b.computer))
+    });
     Ok(snapshots)
 }
 
-/// The newest finished snapshot of `computer`, used as incremental base.
-pub fn latest_usable(destination: &Path, computer: &str) -> Option<SnapshotInfo> {
-    list(destination)
-        .ok()?
-        .into_iter()
-        .find(|s| s.computer.eq_ignore_ascii_case(computer) && s.is_usable_base())
+fn list_encrypted(destination: &Path, key: Option<&VaultKey>, out: &mut Vec<SnapshotInfo>) {
+    let dir = vault::vault_dir(destination).join(vault::SNAPSHOT_DIR);
+    let Ok(files) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for file in files.flatten() {
+        let path = file.path();
+        if path.extension().and_then(|e| e.to_str()) != Some(vault::SNAPSHOT_EXT) {
+            continue;
+        }
+        let Some(id) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        let header = key.and_then(|key| {
+            manifest::read_encrypted(&path, key)
+                .inspect_err(|e| tracing::warn!("{e}"))
+                .ok()
+                .map(|s| s.header)
+        });
+        out.push(SnapshotInfo {
+            computer: header
+                .as_ref()
+                .map(|h| h.computer.clone())
+                .or_else(|| computer_suffix(&id))
+                .unwrap_or_default(),
+            id,
+            location: Location::Encrypted {
+                file: path,
+                destination: destination.to_path_buf(),
+            },
+            header,
+        });
+    }
 }
 
-/// Resolve `latest`, `ID` or `COMPUTER/ID`. Plain IDs prefer this computer.
-pub fn find(destination: &Path, wanted: &str, computer: &str) -> EngineResult<SnapshotInfo> {
-    let all = list(destination)?;
+fn list_legacy(computer_dir: &Path, computer: &str, out: &mut Vec<SnapshotInfo>) {
+    let Ok(children) = std::fs::read_dir(computer_dir) else {
+        return;
+    };
+    for child in children.flatten() {
+        let dir = child.path();
+        let id = child.file_name().to_string_lossy().into_owned();
+        if !dir.is_dir() || !looks_like_snapshot_id(&id) {
+            continue;
+        }
+        let header = if dir.join(HEADER_FILE).is_file() {
+            manifest::read_header(&dir)
+                .inspect_err(|e| tracing::warn!("{e}"))
+                .ok()
+        } else if dir.join(manifest::LEGACY_DATA_DIR).is_dir() {
+            None
+        } else {
+            continue;
+        };
+        out.push(SnapshotInfo {
+            id,
+            computer: computer.to_string(),
+            location: Location::Legacy {
+                dir,
+                computer_dir: computer_dir.to_path_buf(),
+            },
+            header,
+        });
+    }
+}
+
+/// The newest finished snapshot of `computer` of the requested kind, used as
+/// incremental base.
+pub fn latest_usable(
+    destination: &Path,
+    computer: &str,
+    encrypted: bool,
+    key: Option<&VaultKey>,
+) -> Option<SnapshotInfo> {
+    list(destination, key).ok()?.into_iter().find(|s| {
+        s.computer.eq_ignore_ascii_case(computer)
+            && s.is_usable_base()
+            && s.is_encrypted() == encrypted
+    })
+}
+
+/// Whether another computer already writes plain backups into `destination`.
+pub fn has_other_computers(destination: &Path, computer: &str) -> bool {
+    list(destination, None).is_ok_and(|all| {
+        all.iter().any(|s| {
+            !s.is_encrypted()
+                && !s.computer.is_empty()
+                && !s.computer.eq_ignore_ascii_case(computer)
+        })
+    })
+}
+
+/// Resolve `latest`, an id, or a qualified id. Plain ids prefer this computer.
+pub fn find(
+    destination: &Path,
+    wanted: &str,
+    computer: &str,
+    key: Option<&VaultKey>,
+) -> EngineResult<SnapshotInfo> {
+    let all = list(destination, key)?;
     let found = if wanted.eq_ignore_ascii_case("latest") {
         all.into_iter()
             .find(|s| s.computer.eq_ignore_ascii_case(computer) && s.is_usable_base())
-    } else if let Some((pc, id)) = wanted.split_once(['/', '\\']) {
-        all.into_iter()
-            .find(|s| s.computer.eq_ignore_ascii_case(pc) && s.id == id)
     } else {
-        let mut matches: Vec<_> = all.into_iter().filter(|s| s.id == wanted).collect();
+        let mut matches: Vec<_> = all
+            .into_iter()
+            .filter(|s| s.qualified_id() == wanted || s.id == wanted)
+            .collect();
         matches.sort_by_key(|s| !s.computer.eq_ignore_ascii_case(computer));
         matches.into_iter().next()
     };
     found.ok_or_else(|| EngineError::SnapshotNotFound(wanted.to_string()))
 }
 
-/// Snapshot folder names have the shape `YYYY-MM-DD_HHMMSS` with an optional `-N` suffix.
+fn computer_suffix(name: &str) -> Option<String> {
+    let start = name.rfind(" (")?;
+    name.ends_with(')')
+        .then(|| name[start + 2..name.len() - 1].to_string())
+}
+
+/// Snapshot names: `2026-09-14 14-32` (format 2, optional ` (PC)` / `-2`)
+/// or `2026-09-14_143205` (format 1, optional `-2`).
 pub fn looks_like_snapshot_id(name: &str) -> bool {
-    let base = name.split('-').take(3).collect::<Vec<_>>().join("-");
-    let bytes = base.as_bytes();
-    bytes.len() == 17
+    let bytes = name.as_bytes();
+    if bytes.len() < 16 {
+        return false;
+    }
+    let digit = |i: usize| bytes.get(i).is_some_and(u8::is_ascii_digit);
+    let date = (0..4).all(digit)
         && bytes[4] == b'-'
+        && digit(5)
+        && digit(6)
         && bytes[7] == b'-'
-        && bytes[10] == b'_'
-        && bytes
-            .iter()
-            .enumerate()
-            .all(|(i, b)| matches!(i, 4 | 7 | 10) || b.is_ascii_digit())
+        && digit(8)
+        && digit(9);
+    if !date {
+        return false;
+    }
+    let v2 =
+        bytes[10] == b' ' && digit(11) && digit(12) && bytes[13] == b'-' && digit(14) && digit(15);
+    let v1 = bytes.len() >= 17 && bytes[10] == b'_' && (11..17).all(digit);
+    v1 || v2
 }
 
 #[cfg(test)]
 mod tests {
-    use super::looks_like_snapshot_id;
+    use super::*;
 
     #[test]
     fn snapshot_ids() {
         assert!(looks_like_snapshot_id("2026-09-14_143205"));
         assert!(looks_like_snapshot_id("2026-09-14_143205-2"));
+        assert!(looks_like_snapshot_id("2026-09-14 14-32"));
+        assert!(looks_like_snapshot_id("2026-09-14 14-32 (LAPTOP)"));
         assert!(!looks_like_snapshot_id("Documents"));
         assert!(!looks_like_snapshot_id("2026-09-14"));
+        assert_eq!(
+            computer_suffix("2026-09-14 14-32 (LAPTOP)").as_deref(),
+            Some("LAPTOP")
+        );
     }
 }

@@ -3,29 +3,41 @@
 //! egui was chosen because it is a single, self-contained dependency that
 //! renders the whole window itself, so the calm custom look is fully under our
 //! control. See docs/ARCHITECTURE.md for iced, Slint and Tauri as alternatives.
+//!
+//! * `mod.rs` — application state and the frame layout
+//! * `actions.rs` — what happens on clicks: tasks, vault, schedule, loaders
+//! * `dialogs.rs` — confirmation and encryption dialogs
+//! * `views/` — one module per screen
 
+mod actions;
+mod dialogs;
 mod tasks;
+#[cfg(test)]
+mod tests;
 mod theme;
 mod views;
 mod widgets;
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::time::Instant;
 
 use eframe::egui::{self, Align, CornerRadius, Frame, Layout, Margin, Stroke, Ui};
 
-use crate::config::{Appearance, Config, ConfigNotice, Loaded, Source};
-use crate::engine::backup::{self, BackupReport};
-use crate::engine::plan::{self, BackupPlan, ItemKind, RestoreOptions, RestorePlan, RestoreTarget};
-use crate::engine::restore::{self, RestoreReport};
-use crate::engine::snapshots::{self, SnapshotInfo};
-use crate::engine::{paths_equal, scan};
+use crate::config::{Appearance, Config, ConfigNotice, Loaded, Schedule};
+use crate::engine::backup::BackupReport;
+use crate::engine::crypto::VaultKey;
+use crate::engine::plan::{BackupPlan, RestorePlan};
+use crate::engine::restore::RestoreReport;
+use crate::engine::snapshots::SnapshotInfo;
+use crate::engine::vault::VaultHeader;
 use crate::error::EngineError;
 use crate::i18n::Lang;
 use crate::logging::LogBuffer;
 use crate::paths::AppPaths;
-use crate::platform::{self, apps, vss::LiveFiles};
-use tasks::{Job, Task, TaskKind, TaskOutput};
+use crate::platform::{self, apps};
+use crate::state::State;
+use tasks::{Job, Task};
 use theme::palette;
 use widgets::{ButtonKind, NoticeKind};
 
@@ -33,7 +45,7 @@ pub fn run(paths: AppPaths, loaded: Loaded, log: LogBuffer) -> anyhow::Result<()
     let lang = Lang::resolve(loaded.config.language);
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(lang.t().window_title)
-        .with_inner_size([1000.0, 780.0])
+        .with_inner_size([1000.0, 800.0])
         .with_min_inner_size([760.0, 580.0]);
     match eframe::icon_data::from_png_bytes(include_bytes!(
         "../../assets/icon/aeterna-vault-256.png"
@@ -103,15 +115,27 @@ pub struct RestoreUi {
     pub selected: Option<String>,
     pub to_folder: bool,
     pub folder: Option<PathBuf>,
+    /// Parts of the selected backup that are left out (see `RestoreOptions::skip`).
+    pub skip: HashSet<String>,
+}
+
+/// What the catalog knows about an application on this computer.
+#[derive(Debug, Clone, Default)]
+pub struct AppStatus {
+    pub detected: bool,
+    pub folders: usize,
+    pub registry_keys: usize,
+    pub bytes: Option<u64>,
 }
 
 #[derive(Default)]
 pub struct AppsUi {
-    /// Known application data folders, named in the language they were loaded for.
-    pub profiles: Option<(Lang, Vec<apps::KnownProfile>)>,
+    pub status: HashMap<String, AppStatus>,
+    pub status_job: Option<Job<(String, AppStatus)>>,
     pub installed: Option<Vec<apps::InstalledApp>>,
-    pub job: Option<Job<Vec<apps::InstalledApp>>>,
+    pub installed_job: Option<Job<Vec<apps::InstalledApp>>>,
     pub search: String,
+    pub show_not_found: bool,
 }
 
 #[derive(Default)]
@@ -120,9 +144,77 @@ pub struct SettingsUi {
     pub invalid_patterns: Vec<String>,
 }
 
+/// Entries of one folder in the "choose contents" tree.
+#[derive(Debug, Clone)]
+pub struct TreeEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+}
+
+#[derive(Default)]
+pub struct TreeUi {
+    /// Sources (by path) whose tree is open.
+    pub expanded_sources: HashSet<PathBuf>,
+    /// Open folders: `(source path, relative folder)`.
+    pub open_dirs: HashSet<(PathBuf, String)>,
+    pub listings: HashMap<PathBuf, Vec<TreeEntry>>,
+}
+
+/// A step that was waiting for the vault to be unlocked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterUnlock {
+    Backup { confirm: bool },
+    EnableEncryption,
+    RefreshSnapshots,
+    ChangePassphrase,
+    Remember,
+}
+
+pub enum VaultDialog {
+    Create {
+        passphrase: String,
+        repeat: String,
+        remember: bool,
+        error: Option<String>,
+    },
+    ShowRecovery {
+        key: String,
+        confirmed: bool,
+    },
+    Unlock {
+        secret: String,
+        remember: bool,
+        error: Option<String>,
+        then: AfterUnlock,
+    },
+    Change {
+        passphrase: String,
+        repeat: String,
+        error: Option<String>,
+    },
+}
+
+#[derive(Default)]
+pub struct VaultUi {
+    /// The vault at the current destination, if one exists.
+    pub header: Option<VaultHeader>,
+    pub key: Option<VaultKey>,
+    pub remembered: bool,
+    pub dialog: Option<VaultDialog>,
+}
+
+pub struct ScheduleUi {
+    /// The schedule that is currently installed in the Task Scheduler.
+    pub applied: Option<Schedule>,
+    pub job: Option<Job<(Schedule, Result<(), String>)>>,
+}
+
 pub struct AeternaApp {
     pub paths: AppPaths,
     pub config: Config,
+    pub state: State,
+    pub catalog: apps::Catalog,
     pub lang: Lang,
     pub view: View,
     pub screen: Screen,
@@ -137,10 +229,15 @@ pub struct AeternaApp {
     pub snapshots: Option<Result<Vec<SnapshotInfo>, EngineError>>,
     snapshots_job: Option<Job<SnapshotLoad>>,
     pub destination_free: Option<u64>,
+    pub running: HashSet<String>,
+    running_checked: Option<Instant>,
 
     pub restore: RestoreUi,
     pub apps: AppsUi,
     pub settings: SettingsUi,
+    pub tree: TreeUi,
+    pub vault: VaultUi,
+    pub schedule: ScheduleUi,
     config_dirty: bool,
     applied_title: Option<Lang>,
 }
@@ -148,11 +245,19 @@ pub struct AeternaApp {
 impl AeternaApp {
     fn new(ctx: &egui::Context, paths: AppPaths, loaded: Loaded, log: LogBuffer) -> Self {
         let lang = Lang::resolve(loaded.config.language);
+        let config_dir = paths
+            .config_file
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        let state = State::load(&paths.config_file);
         let mut app = Self {
             settings: SettingsUi {
                 exclude_text: loaded.config.exclude.join("\n"),
                 invalid_patterns: Vec::new(),
             },
+            catalog: apps::Catalog::load(&config_dir),
+            state,
             paths,
             config: loaded.config,
             lang,
@@ -168,8 +273,16 @@ impl AeternaApp {
             snapshots: None,
             snapshots_job: None,
             destination_free: None,
+            running: HashSet::new(),
+            running_checked: None,
             restore: RestoreUi::default(),
             apps: AppsUi::default(),
+            tree: TreeUi::default(),
+            vault: VaultUi::default(),
+            schedule: ScheduleUi {
+                applied: None,
+                job: None,
+            },
             config_dirty: false,
             applied_title: Some(lang),
         };
@@ -177,8 +290,24 @@ impl AeternaApp {
         if let Some(notice) = loaded.notice {
             app.config_notice(notice);
         }
+        if let Some(run) = app.state.unseen_automatic().cloned() {
+            let (ok, text) = app.lang.automatic_result(&run);
+            app.notify(
+                if ok {
+                    NoticeKind::Success
+                } else {
+                    NoticeKind::Warning
+                },
+                text,
+            );
+            app.state.acknowledged_at = Some(chrono::Utc::now());
+            app.state.save(&app.paths.config_file);
+        }
+        app.refresh_vault();
         app.refresh_sizes(ctx);
         app.refresh_snapshots(ctx);
+        app.refresh_app_status(ctx);
+        app.check_schedule_on_start(ctx);
         app
     }
 
@@ -212,325 +341,6 @@ impl AeternaApp {
 
     pub fn is_busy(&self) -> bool {
         self.task.is_some()
-    }
-
-    // --- sources ---------------------------------------------------------------
-
-    pub fn add_source(&mut self, ctx: &egui::Context, source: Source) {
-        if self.config.has_source_path(&source.path) {
-            return;
-        }
-        tracing::info!("source added: {}", source.path.display());
-        self.config.sources.push(source);
-        self.mark_dirty();
-        self.refresh_sizes(ctx);
-    }
-
-    pub fn add_folder(&mut self, ctx: &egui::Context, path: PathBuf) {
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        self.add_source(ctx, Source::new(name, path, true));
-    }
-
-    pub fn size_of(&self, path: &Path) -> Option<&Option<(u64, u64)>> {
-        self.sizes
-            .iter()
-            .find(|(p, _)| paths_equal(p, path))
-            .map(|(_, size)| size)
-    }
-
-    pub fn refresh_sizes(&mut self, ctx: &egui::Context) {
-        if let Some(job) = self.sizes_job.take() {
-            job.cancel.cancel();
-        }
-        let pending: Vec<PathBuf> = self
-            .config
-            .sources
-            .iter()
-            .map(|s| s.path.clone())
-            .filter(|p| self.size_of(p).and_then(|s| s.as_ref()).is_none())
-            .collect();
-        if pending.is_empty() {
-            return;
-        }
-        self.sizes_job = Some(Job::spawn(ctx, move |cancel, send| {
-            for path in pending {
-                if cancel.is_cancelled() {
-                    return;
-                }
-                let size = if path.is_dir() {
-                    scan::folder_size(&path, cancel)
-                } else {
-                    None
-                };
-                send((path, size));
-            }
-        }));
-    }
-
-    // --- snapshots -------------------------------------------------------------
-
-    pub fn refresh_snapshots(&mut self, ctx: &egui::Context) {
-        let destination = self.config.destination.clone();
-        if destination.as_os_str().is_empty() {
-            self.snapshots = Some(Err(EngineError::NoDestination));
-            return;
-        }
-        self.snapshots_job = Some(Job::spawn(ctx, move |_, send| {
-            let list = snapshots::list(&destination);
-            let free = platform::free_space(&destination);
-            send((list, free));
-        }));
-    }
-
-    pub fn last_backup(&self) -> Option<&SnapshotInfo> {
-        match &self.snapshots {
-            Some(Ok(list)) => list
-                .iter()
-                .find(|s| s.computer.eq_ignore_ascii_case(&self.computer)),
-            _ => None,
-        }
-    }
-
-    pub fn destination_reachable(&self) -> Option<bool> {
-        match &self.snapshots {
-            Some(Err(EngineError::DestinationUnavailable(_))) => Some(false),
-            Some(_) => Some(true),
-            None => None,
-        }
-    }
-
-    fn poll_jobs(&mut self, ctx: &egui::Context) {
-        if let Some(job) = &self.sizes_job {
-            let (values, finished) = job.drain();
-            for (path, size) in values {
-                self.sizes.insert(path, size);
-            }
-            if finished {
-                self.sizes_job = None;
-            }
-        }
-
-        if let Some(job) = &self.snapshots_job {
-            let (mut values, finished) = job.drain();
-            if let Some((list, free)) = values.pop() {
-                if let Ok(list) = &list {
-                    let still_there = self
-                        .restore
-                        .selected
-                        .as_ref()
-                        .is_some_and(|sel| list.iter().any(|s| &s.qualified_id() == sel));
-                    if !still_there {
-                        self.restore.selected = list
-                            .iter()
-                            .find(|s| {
-                                s.header.is_some()
-                                    && s.computer.eq_ignore_ascii_case(&self.computer)
-                            })
-                            .or_else(|| list.iter().find(|s| s.header.is_some()))
-                            .map(|s| s.qualified_id());
-                    }
-                }
-                self.snapshots = Some(list);
-                self.destination_free = free;
-            }
-            if finished {
-                self.snapshots_job = None;
-            }
-        }
-
-        if let Some(job) = &self.apps.job {
-            let (mut values, finished) = job.drain();
-            if let Some(list) = values.pop() {
-                self.apps.installed = Some(list);
-            }
-            if finished {
-                self.apps.job = None;
-            }
-        }
-
-        if let Some(task) = &mut self.task
-            && let Some(result) = task.poll()
-        {
-            let kind = task.kind;
-            self.task = None;
-            self.finish_task(ctx, kind, result);
-        }
-    }
-
-    // --- operations ------------------------------------------------------------
-
-    pub fn plan_backup(&mut self, ctx: &egui::Context, confirm: bool) {
-        if self.is_busy() {
-            return;
-        }
-        let config = self.config.clone();
-        let computer = self.computer.clone();
-        self.task = Some(Task::spawn(
-            ctx,
-            TaskKind::PlanBackup { confirm },
-            move |cancel, progress| {
-                TaskOutput::BackupPlan(plan::plan_backup(&config, &computer, cancel, progress))
-            },
-        ));
-        self.screen = Screen::Working;
-    }
-
-    pub fn selected_snapshot(&self) -> Option<&SnapshotInfo> {
-        let selected = self.restore.selected.as_ref()?;
-        match &self.snapshots {
-            Some(Ok(list)) => list.iter().find(|s| &s.qualified_id() == selected),
-            _ => None,
-        }
-    }
-
-    pub fn plan_restore(&mut self, ctx: &egui::Context, confirm: bool) {
-        if self.is_busy() {
-            return;
-        }
-        let Some(snapshot) = self.selected_snapshot().cloned() else {
-            return;
-        };
-        let target = if self.restore.to_folder {
-            match &self.restore.folder {
-                Some(folder) => RestoreTarget::Folder(folder.clone()),
-                None => {
-                    self.notify(NoticeKind::Warning, self.lang.t().choose_folder_first);
-                    return;
-                }
-            }
-        } else {
-            RestoreTarget::Original
-        };
-        let options = RestoreOptions {
-            target,
-            conflict: self.config.advanced.restore_conflict,
-            verify: self.config.advanced.verify_on_restore,
-        };
-        self.task = Some(Task::spawn(
-            ctx,
-            TaskKind::PlanRestore { confirm },
-            move |cancel, progress| {
-                TaskOutput::RestorePlan(plan::plan_restore(&snapshot, options, cancel, progress))
-            },
-        ));
-        self.screen = Screen::Working;
-    }
-
-    pub fn start_backup(&mut self, ctx: &egui::Context, plan: Box<BackupPlan>) {
-        if self.is_busy() {
-            return;
-        }
-        self.task = Some(Task::spawn(
-            ctx,
-            TaskKind::Backup,
-            move |cancel, progress| {
-                TaskOutput::Backup(backup::run_backup(&plan, &LiveFiles, cancel, progress))
-            },
-        ));
-        self.screen = Screen::Working;
-    }
-
-    pub fn start_restore(&mut self, ctx: &egui::Context, plan: Box<RestorePlan>) {
-        if self.is_busy() {
-            return;
-        }
-        self.task = Some(Task::spawn(
-            ctx,
-            TaskKind::Restore,
-            move |cancel, progress| {
-                TaskOutput::Restore(restore::run_restore(&plan, cancel, progress))
-            },
-        ));
-        self.screen = Screen::Working;
-    }
-
-    fn finish_task(
-        &mut self,
-        ctx: &egui::Context,
-        kind: TaskKind,
-        result: Result<TaskOutput, String>,
-    ) {
-        let output = match result {
-            Ok(output) => output,
-            Err(panic) => {
-                tracing::error!("background task failed: {panic}");
-                self.notify(NoticeKind::Error, self.lang.t().unexpected_problem);
-                self.screen = Screen::Main;
-                return;
-            }
-        };
-
-        match output {
-            TaskOutput::BackupPlan(Ok(plan)) => {
-                let confirm = matches!(kind, TaskKind::PlanBackup { confirm: true });
-                if !confirm {
-                    self.screen =
-                        Screen::Preview(Box::new(views::preview::PreviewState::backup(plan)));
-                } else if self.config.advanced.confirm_before_start {
-                    self.pending = Some(Pending::Backup(Box::new(plan)));
-                    self.screen = Screen::Main;
-                } else {
-                    self.start_backup(ctx, Box::new(plan));
-                }
-            }
-            TaskOutput::RestorePlan(Ok(plan)) => {
-                let confirm = matches!(kind, TaskKind::PlanRestore { confirm: true });
-                let replaces = plan.summary.count(ItemKind::Changed) > 0;
-                if !confirm {
-                    self.screen =
-                        Screen::Preview(Box::new(views::preview::PreviewState::restore(plan)));
-                } else if self.config.advanced.confirm_before_start || replaces {
-                    // Overwriting files always asks, regardless of the setting.
-                    self.pending = Some(Pending::Restore(Box::new(plan)));
-                    self.screen = Screen::Main;
-                } else {
-                    self.start_restore(ctx, Box::new(plan));
-                }
-            }
-            TaskOutput::BackupPlan(Err(err)) | TaskOutput::RestorePlan(Err(err)) => {
-                self.screen = Screen::Main;
-                if !matches!(err, EngineError::Cancelled) {
-                    tracing::warn!("planning failed: {err}");
-                    self.notify(NoticeKind::Warning, self.lang.error_message(&err));
-                }
-            }
-            TaskOutput::Backup(result) => {
-                let result = result.map_err(|e| {
-                    tracing::error!("backup failed: {e}");
-                    self.lang.error_message(&e)
-                });
-                self.screen = Screen::Done(Box::new(Done::Backup(result)));
-                self.refresh_snapshots(ctx);
-            }
-            TaskOutput::Restore(result) => {
-                let result = result.map_err(|e| {
-                    tracing::error!("restore failed: {e}");
-                    self.lang.error_message(&e)
-                });
-                self.screen = Screen::Done(Box::new(Done::Restore(result)));
-                self.sizes.clear();
-                self.refresh_sizes(ctx);
-            }
-        }
-    }
-
-    pub fn reload_config(&mut self, ctx: &egui::Context) {
-        let loaded = crate::config::load_or_create(&self.paths);
-        self.config = loaded.config;
-        self.lang = Lang::resolve(self.config.language);
-        self.settings.exclude_text = self.config.exclude.join("\n");
-        theme::install_fonts(ctx, &self.config.fonts);
-        theme::apply(ctx, self.config.appearance);
-        self.sizes.clear();
-        self.refresh_sizes(ctx);
-        self.refresh_snapshots(ctx);
-        match loaded.notice {
-            Some(notice) => self.config_notice(notice),
-            None => self.notify(NoticeKind::Success, self.lang.t().config_reloaded),
-        }
     }
 
     fn save_if_dirty(&mut self) {
@@ -656,101 +466,6 @@ impl AeternaApp {
             });
     }
 
-    fn confirmation(&mut self, ui: &mut Ui) {
-        let Some(pending) = &self.pending else {
-            return;
-        };
-        let t = self.lang.t();
-        let lang = self.lang;
-        let mut action = 0; // 1 = start, 2 = details, 3 = cancel
-
-        let frame_palette = *palette(ui);
-        let frame = Frame::new()
-            .fill(frame_palette.panel)
-            .stroke(Stroke::new(1.0, frame_palette.border))
-            .corner_radius(CornerRadius::same(8))
-            .inner_margin(Margin::same(26))
-            .shadow(ui.visuals().window_shadow);
-        let modal = egui::Modal::new(egui::Id::new("confirm"))
-            .frame(frame)
-            .show(ui.ctx(), |ui| {
-                let p = *palette(ui);
-                ui.set_max_width(480.0);
-                let (heading, body, warn) = match pending {
-                    Pending::Backup(plan) => {
-                        let (files, bytes) = plan.copy_totals();
-                        (
-                            t.confirm_backup_title,
-                            lang.confirm_backup(
-                                files,
-                                bytes,
-                                &plan.destination.display().to_string(),
-                            ),
-                            false,
-                        )
-                    }
-                    Pending::Restore(plan) => (
-                        t.confirm_restore_title,
-                        lang.confirm_restore(
-                            plan.summary.count(ItemKind::New),
-                            plan.summary.count(ItemKind::Changed),
-                        ),
-                        plan.summary.count(ItemKind::Changed) > 0,
-                    ),
-                };
-                ui.label(
-                    egui::RichText::new(heading)
-                        .family(egui::FontFamily::Name(theme::SERIF.into()))
-                        .size(22.0),
-                );
-                ui.add_space(6.0);
-                ui.add(egui::Label::new(body).wrap());
-                if warn {
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new(t.confirm_overwrite).color(p.warning));
-                }
-                ui.add_space(16.0);
-                ui.horizontal(|ui| {
-                    if widgets::button(ui, ButtonKind::Quiet, t.show_details, true).clicked() {
-                        action = 2;
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if widgets::button(ui, ButtonKind::Primary, t.start, true).clicked() {
-                            action = 1;
-                        }
-                        if widgets::button(ui, ButtonKind::Secondary, t.cancel, true).clicked() {
-                            action = 3;
-                        }
-                    });
-                });
-            });
-        if modal.should_close() && action == 0 {
-            action = 3;
-        }
-
-        let ctx = ui.ctx().clone();
-        match action {
-            1 => match self.pending.take() {
-                Some(Pending::Backup(plan)) => self.start_backup(&ctx, plan),
-                Some(Pending::Restore(plan)) => self.start_restore(&ctx, plan),
-                None => {}
-            },
-            2 => match self.pending.take() {
-                Some(Pending::Backup(plan)) => {
-                    self.screen =
-                        Screen::Preview(Box::new(views::preview::PreviewState::backup(*plan)));
-                }
-                Some(Pending::Restore(plan)) => {
-                    self.screen =
-                        Screen::Preview(Box::new(views::preview::PreviewState::restore(*plan)));
-                }
-                None => {}
-            },
-            3 => self.pending = None,
-            _ => {}
-        }
-    }
-
     fn handle_dropped_folders(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
@@ -800,6 +515,7 @@ impl eframe::App for AeternaApp {
         let ctx = ui.ctx().clone();
         self.poll_jobs(&ctx);
         self.handle_dropped_folders(&ctx);
+        self.refresh_running_processes(&ctx);
 
         if self.applied_title != Some(self.lang) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(
@@ -822,14 +538,6 @@ impl eframe::App for AeternaApp {
                         .inner_margin(Margin::symmetric(32, 14)),
                 )
                 .show(ui, |ui| {
-                    let rect = ui.max_rect();
-                    ui.painter().line_segment(
-                        [
-                            egui::pos2(rect.left() - 32.0, rect.top() - 14.0),
-                            egui::pos2(rect.right() + 32.0, rect.top() - 14.0),
-                        ],
-                        Stroke::new(1.0, p.border),
-                    );
                     widgets::centered_column(ui, 860.0, |ui| match self.view {
                         View::Restore => views::restore::action_bar(self, ui),
                         _ => views::backup::action_bar(self, ui),
@@ -867,6 +575,7 @@ impl eframe::App for AeternaApp {
                     Screen::Done(_) => views::working::show_done(self, ui),
                     Screen::Main => {
                         egui::ScrollArea::vertical()
+                            .id_salt(("main", self.view as u8))
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 widgets::centered_column(ui, 860.0, |ui| match self.view {
@@ -881,7 +590,9 @@ impl eframe::App for AeternaApp {
                 }
             });
 
-        self.confirmation(ui);
+        dialogs::confirmation(self, ui);
+        dialogs::vault_dialog(self, ui);
+        self.apply_schedule(&ctx);
         self.save_if_dirty();
     }
 

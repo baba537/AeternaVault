@@ -3,12 +3,69 @@
 //! simple fallbacks so the code base can grow in that direction later.
 
 pub mod apps;
+pub mod known_paths;
+pub mod registry;
+pub mod scheduler;
 pub mod vss;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
 mod windows;
+
+/// Marks a folder as hidden. Failures are ignored: hiding is cosmetic.
+pub fn set_hidden(path: &Path) {
+    #[cfg(windows)]
+    if let Err(err) = windows::set_hidden(path) {
+        tracing::debug!("could not hide {}: {err}", path.display());
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+}
+
+/// Lower CPU and I/O priority for unattended runs.
+pub fn enter_background_mode() {
+    #[cfg(windows)]
+    windows::enter_background_mode();
+}
+
+/// Lower-case executable names of running processes.
+pub fn running_processes() -> HashSet<String> {
+    #[cfg(windows)]
+    {
+        windows::running_processes()
+    }
+    #[cfg(not(windows))]
+    {
+        HashSet::new()
+    }
+}
+
+/// Protect secret bytes for the current user (Windows DPAPI).
+pub fn protect_for_user(data: &[u8]) -> std::io::Result<Vec<u8>> {
+    #[cfg(windows)]
+    {
+        windows::dpapi_protect(data)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = data;
+        Err(std::io::Error::other("not supported on this platform"))
+    }
+}
+
+pub fn unprotect_for_user(data: &[u8]) -> std::io::Result<Vec<u8>> {
+    #[cfg(windows)]
+    {
+        windows::dpapi_unprotect(data)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = data;
+        Err(std::io::Error::other("not supported on this platform"))
+    }
+}
 
 /// Attach to the console of the parent process (for command-line use of a
 /// GUI-subsystem executable). Does nothing if there is no parent console.

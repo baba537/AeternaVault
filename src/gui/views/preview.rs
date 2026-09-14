@@ -415,6 +415,9 @@ fn chip(ui: &mut Ui, text: &str, selected: bool, dot: Color32) -> bool {
         galley,
         if selected { p.text } else { p.text_secondary },
     );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, text)
+    });
     response.on_hover_cursor(CursorIcon::PointingHand).clicked()
 }
 

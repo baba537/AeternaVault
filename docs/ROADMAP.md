@@ -5,36 +5,32 @@ is optional, and the order is open for discussion.
 
 ## Next
 
-- [ ] **Scheduled backups.** A settings page that creates a Windows Task
-      Scheduler entry running `AeternaVault.exe backup` (daily / weekly / at
-      logon), plus a quiet notification when it finishes.
 - [ ] **Keeping and removing old backups.** Retention rules such as "all of the
       last 7 days, one per week for 3 months, one per month forever", with a
-      preview of what would be removed. Must respect `blob` references into
-      older snapshots.
-- [ ] **Check a backup.** Re-read every stored file and compare SHA-256, report
-      damaged or missing files.
-- [ ] **Browse and restore single files.** A tree view of a snapshot with
-      search, and "restore this file / folder".
+      preview of what would be removed. Especially useful with automatic backups.
+      Must respect `blob` references into older backups and shared encrypted blobs.
+- [ ] **Check a backup.** Re-read every stored file (or decrypt every blob) and
+      compare SHA-256, report damaged or missing files; optionally on a schedule.
+- [ ] **Browse and restore single files.** A tree view of a backup with search,
+      and "restore this file / folder" — also for encrypted backups.
 - [ ] **Volume Shadow Copy (VSS).** Consistent copies of files in use (Outlook
       PST, browser databases). Needs administrator rights; implement
       `platform::vss::FileReader` with `IVssBackupComponents`.
+- [ ] **Notifications.** A quiet Windows toast when an automatic backup could not
+      run (e.g. passphrase not remembered for a long time).
 
 ## Later
 
-- [ ] **Registry and application settings.** Export selected HKCU keys
-      (`reg export` format) per application and re-import on restore.
-- [ ] **Installed applications list for restore.** Save the list of installed
-      programs (desktop and Microsoft Store via `PackageManager`) with every
-      backup, as a checklist after reinstalling Windows.
-- [ ] **Default app associations.** Store the output of
-      `dism /Online /Export-DefaultAppAssociations` for reference.
+- [ ] **More application knowledge.** Microsoft Store apps (`PackageManager`),
+      Wi-Fi profiles (`netsh wlan export`, needs administrator rights for keys),
+      default app associations (`dism /Export-DefaultAppAssociations`), printer
+      settings. Community-maintained catalog updates.
 - [ ] **Owner filter.** Optionally back up only files owned by the current user
       (`GetNamedSecurityInfoW` / NTFS owner SID).
-- [ ] **Compression.** Optional zstd per file, keeping the browsable layout
-      (`.zst` suffix) or a pack format for many small files.
-- [ ] **Encryption.** Optional, password-based (e.g. `age` with scrypt), with a
-      very clear warning that a lost password means lost data.
+- [ ] **Compression.** Optional zstd per file (plain: `.zst` suffix; encrypted:
+      before encryption), or a pack format for many small files.
+- [ ] **Encrypted pack files.** Combine small blobs into larger packs to reduce
+      the number of files in cloud folders.
 - [ ] **Network destinations.** Better handling of NAS / SMB shares: credentials
       via Windows Credential Manager, reconnect and retry.
 - [ ] **Preserve more metadata.** Attributes (read-only, hidden), creation time,
@@ -42,7 +38,7 @@ is optional, and the order is open for discussion.
 - [ ] **Faster scans.** Parallel walking (`jwalk`) and NTFS USN journal for
       change detection on large folders.
 - [ ] **Compact index.** SQLite or compressed JSON for backups with millions of files.
-- [ ] **Tray icon** with last backup status.
+- [ ] **Tray icon** with last backup status (optional, for people who prefer it).
 
 ## Distribution
 
@@ -50,6 +46,17 @@ is optional, and the order is open for discussion.
 - [ ] `winget` manifest and/or an MSI / MSIX installer (e.g. `cargo-wix`).
 - [ ] ARM64 Windows build.
 - [ ] More languages (French, Italian, Spanish …) — see CONTRIBUTING.md.
+- [ ] External security review of the encryption format.
+
+## Done in 0.2.0
+
+- [x] Application settings catalog (folders and HKCU registry), portable paths
+- [x] Choose sub-folders and files of a source
+- [x] Encrypted backups with passphrase and recovery key
+- [x] Automatic backups via the Task Scheduler
+- [x] Flatter backup folder structure
+- [x] Restore selection, program list and winget export, open-application warnings
+- [x] Interface tests, accessible labels
 
 ## Done in 0.1.0
 
@@ -57,5 +64,4 @@ is optional, and the order is open for discussion.
 - [x] Read-only preview with filters and export
 - [x] Restore to original locations or another folder, with verification
 - [x] English and German, dark and light
-- [x] Application data suggestions, installed programs overview
 - [x] CLI, portable mode, logs, CI and release workflow

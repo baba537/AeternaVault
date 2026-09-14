@@ -18,15 +18,21 @@ Helpful details:
 
 Examples of issues that are in scope:
 
-- a restore writing outside the selected target folder
-- the preview (dry run) changing anything on disk
+- a restore writing outside the selected target folder or outside `HKEY_CURRENT_USER`
+- the preview (dry run) changing anything on disk or in the registry
 - a backup silently missing files or storing damaged content
-- unsafe handling of paths from `files.json` or `config.toml`
+- unsafe handling of paths from `files.json`, `.avs` indexes, `apps.toml` or `config.toml`
+- weaknesses in the encryption format or its implementation
+  (see [docs/ENCRYPTION.md](docs/ENCRYPTION.md)), including leaks of passphrases
+  or keys into logs or files
 
 ## Current limitations
 
-- Backups are **not encrypted** yet. Keep the backup destination as private as
-  the original data.
+- Plain (unencrypted) backups are as readable as the original data. Turn on
+  encryption for cloud folders and sensitive data.
+- The encryption has not had an external audit yet.
+- A vault key remembered for automatic backups is protected by Windows DPAPI:
+  software running as your Windows user can use it.
 - Release executables are **not code-signed** unless a signing certificate has
   been configured; Windows SmartScreen may warn. Compare the SHA-256 checksum
   from `SHA256SUMS.txt` before running a downloaded file.
