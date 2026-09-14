@@ -91,6 +91,11 @@ jobs:
             $end = ($rest | Select-String -Pattern '^## \[' | Select-Object -First 1).LineNumber
             $notes = if ($end) { $rest[0..($end - 2)] } else { $rest }
           }
+          # Link definitions such as "[0.1.0]: https://..." belong to the changelog only.
+          $notes = @($notes | Where-Object { $_ -notmatch '^\[[^\]]+\]:\s' })
+          $last = $notes.Count - 1
+          while ($last -ge 0 -and [string]::IsNullOrWhiteSpace($notes[$last])) { $last-- }
+          $notes = if ($last -ge 0) { @($notes[0..$last]) } else { @() }
           $notes += ''
           $notes += '**Verify the download** (PowerShell): `Get-FileHash .\AeternaVault.exe -Algorithm SHA256` and compare with `SHA256SUMS.txt`.'
           $notes | Set-Content release-notes.md -Encoding utf8
