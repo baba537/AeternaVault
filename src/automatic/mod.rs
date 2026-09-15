@@ -112,18 +112,31 @@ pub fn run_unattended(
 
     match backup::run_backup(&plan, key.as_ref(), &LiveFiles, cancel, on_progress) {
         Ok(report) => {
-            let stats = &report.header.stats;
             let outcome = if report.header.status == SnapshotStatus::Complete {
                 AutomaticOutcome::Complete
             } else {
                 AutomaticOutcome::CompleteWithNotes
             };
+            let total = report.total_stats();
             let run = finished(
                 outcome,
                 report.warnings.first().cloned().unwrap_or_default(),
-                stats.files,
-                stats.bytes,
+                total.files,
+                total.bytes,
             );
+            match apply_retention(
+                &config.destination,
+                &config.retention,
+                &computer,
+                key.as_ref(),
+                cancel,
+            ) {
+                Some(Err(err)) => tracing::warn!("old backups could not be removed: {err}"),
+                Some(Ok(removed)) => {
+                    tracing::info!("{} old backups removed", removed.deleted.len())
+                }
+                None => {}
+            }
             (run, Some(report))
         }
         Err(err) => {
@@ -131,6 +144,43 @@ pub fn run_unattended(
             (finished(outcome_for(&err), err.to_string(), 0, 0), None)
         }
     }
+}
+
+/// Removes old backups of this computer by the retention rules. `None` if the
+/// rules are off or nothing is to be removed. Encrypted backups are only
+/// removed with a key.
+pub fn apply_retention(
+    destination: &std::path::Path,
+    policy: &crate::config::Retention,
+    computer: &str,
+    key: Option<&VaultKey>,
+    cancel: &CancelToken,
+) -> Option<Result<crate::engine::manage::DeleteReport, EngineError>> {
+    if !policy.enabled {
+        return None;
+    }
+    let all = crate::engine::snapshots::list(destination, key).ok()?;
+    let ids: Vec<String> = crate::engine::retention::to_remove(&all, policy, computer)
+        .into_iter()
+        .filter(|id| {
+            key.is_some()
+                || all
+                    .iter()
+                    .find(|s| &s.qualified_id() == id)
+                    .is_some_and(|s| !s.needs_key())
+        })
+        .collect();
+    if ids.is_empty() {
+        return None;
+    }
+    tracing::info!("removing {} old backups by the retention rules", ids.len());
+    Some(crate::engine::manage::delete(
+        destination,
+        &ids,
+        key,
+        cancel,
+        &mut |_| {},
+    ))
 }
 
 fn outcome_for(err: &EngineError) -> AutomaticOutcome {

@@ -40,11 +40,19 @@ pub fn show_working(app: &mut AeternaApp, ui: &mut Ui) {
                 (TaskKind::PlanRestore { .. }, _) => t.working_scan_restore,
                 (TaskKind::Backup, _) => t.working_backup,
                 (TaskKind::Restore, _) => t.working_restore,
+                (TaskKind::Verify, _) => t.working_verify,
+                (TaskKind::Delete, _) => t.working_delete,
+                (TaskKind::Transfer, _) => t.working_transfer,
+                (TaskKind::Extract { .. }, _) => t.working_extract,
+                (TaskKind::LoadContents, _) => t.loading,
             };
             heading(ui, title);
             ui.add_space(14.0);
 
             match kind {
+                TaskKind::Delete | TaskKind::LoadContents => {
+                    widgets::progress_line(ui, None);
+                }
                 TaskKind::PlanBackup { .. } => {
                     widgets::progress_line(ui, None);
                     ui.add_space(8.0);
@@ -63,15 +71,12 @@ pub fn show_working(app: &mut AeternaApp, ui: &mut Ui) {
                         lang.files_of(progress.files_done, progress.files_total),
                     );
                 }
-                TaskKind::Backup | TaskKind::Restore => {
-                    let fraction = if progress.bytes_total > 0 {
-                        Some(progress.bytes_done as f32 / progress.bytes_total as f32)
-                    } else if progress.files_total > 0 {
-                        Some(progress.files_done as f32 / progress.files_total as f32)
-                    } else {
-                        None
-                    };
-                    widgets::progress_line(ui, fraction);
+                TaskKind::Backup
+                | TaskKind::Restore
+                | TaskKind::Verify
+                | TaskKind::Transfer
+                | TaskKind::Extract { .. } => {
+                    widgets::progress_line(ui, progress.fraction());
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         widgets::secondary_text(
@@ -135,10 +140,12 @@ pub fn show_done(app: &mut AeternaApp, ui: &mut Ui) {
         widgets::card(ui, |ui| {
             ui.add_space(4.0);
             let mut warnings: &[String] = &[];
+            let mut extra_notes: Vec<String> = Vec::new();
             let mut open_folder = None;
             match done.as_ref() {
                 Done::Backup(Ok(report)) => {
                     let h = &report.header;
+                    let stats = report.total_stats();
                     heading(
                         ui,
                         match h.status {
@@ -151,19 +158,92 @@ pub fn show_done(app: &mut AeternaApp, ui: &mut Ui) {
                     );
                     ui.add_space(8.0);
                     ui.label(lang.backup_result(
-                        h.stats.copied_files,
-                        h.stats.linked_files + h.stats.referenced_files,
-                        h.stats.bytes,
+                        stats.copied_files,
+                        stats.linked_files + stats.referenced_files,
+                        stats.bytes,
                         report.duration,
                     ));
                     widgets::secondary_text(ui, report.snapshot_dir.display().to_string());
-                    if h.stats.failed > 0 {
+                    if let Some(part) = &report.encrypted_part {
+                        widgets::secondary_text(ui, lang.encrypted_part_files(part.stats.files));
+                    }
+                    if stats.failed > 0 {
                         ui.label(
-                            egui::RichText::new(lang.failed_files(h.stats.failed)).color(p.warning),
+                            egui::RichText::new(lang.failed_files(stats.failed)).color(p.warning),
                         );
                     }
                     warnings = &report.warnings;
                     open_folder = Some(report.snapshot_dir.clone());
+                }
+                Done::Verify(Ok(report)) => {
+                    heading(
+                        ui,
+                        if report.cancelled {
+                            t.done_verify_cancelled
+                        } else if report.is_ok() {
+                            t.done_verify_ok
+                        } else {
+                            t.done_verify_problems
+                        },
+                    );
+                    ui.add_space(8.0);
+                    ui.label(lang.verify_result(report.files, report.bytes, report.duration));
+                    if !report.damaged.is_empty() || !report.missing.is_empty() {
+                        ui.label(
+                            egui::RichText::new(
+                                lang.verify_problems(report.damaged.len(), report.missing.len()),
+                            )
+                            .color(p.warning),
+                        );
+                        extra_notes = report
+                            .damaged
+                            .iter()
+                            .map(|d| format!("{}: {d}", t.damaged_label))
+                            .chain(
+                                report
+                                    .missing
+                                    .iter()
+                                    .map(|m| format!("{}: {m}", t.missing_label)),
+                            )
+                            .collect();
+                    }
+                }
+                Done::Delete(Ok(report)) => {
+                    heading(ui, t.done_delete);
+                    ui.add_space(8.0);
+                    ui.label(lang.delete_result(report));
+                    warnings = &report.warnings;
+                }
+                Done::Transfer(Ok(report)) => {
+                    heading(ui, t.done_transfer);
+                    ui.add_space(8.0);
+                    ui.label(lang.transfer_result(report.files, report.bytes, report.duration));
+                    if report.delete.rehomed_files > 0 {
+                        widgets::secondary_text(ui, lang.rehomed_note(report.delete.rehomed_files));
+                    }
+                }
+                Done::Extract(Ok((report, target))) => {
+                    heading(
+                        ui,
+                        if report.failed.is_empty() && !report.cancelled {
+                            t.done_extract
+                        } else {
+                            t.done_extract_notes
+                        },
+                    );
+                    ui.add_space(8.0);
+                    ui.label(lang.extract_result(report.files, report.bytes, report.duration));
+                    widgets::secondary_text(ui, target.display().to_string());
+                    warnings = &report.failed;
+                    open_folder = Some(target.clone());
+                }
+                Done::Verify(Err(message))
+                | Done::Delete(Err(message))
+                | Done::Transfer(Err(message))
+                | Done::Extract(Err(message)) => {
+                    heading(ui, t.done_failed);
+                    ui.add_space(8.0);
+                    ui.add(egui::Label::new(egui::RichText::new(message).color(p.warning)).wrap());
                 }
                 Done::Restore(Ok(report)) => {
                     heading(
@@ -200,6 +280,9 @@ pub fn show_done(app: &mut AeternaApp, ui: &mut Ui) {
                 }
             }
 
+            if !extra_notes.is_empty() {
+                warnings = &extra_notes;
+            }
             if !warnings.is_empty() {
                 ui.add_space(10.0);
                 egui::CollapsingHeader::new(

@@ -12,6 +12,7 @@
 mod actions;
 mod background;
 mod dialogs;
+mod manage;
 mod tasks;
 #[cfg(test)]
 mod tests;
@@ -50,6 +51,8 @@ pub struct StartOptions {
     pub hidden: bool,
     /// Name that lets a second start find this instance.
     pub instance_key: String,
+    /// Browse the backups at this path instead of the normal window.
+    pub viewer: Option<PathBuf>,
 }
 
 pub fn run(
@@ -114,7 +117,13 @@ fn launch(
             theme::install_fonts(&cc.egui_ctx, &loaded.config.fonts);
             theme::apply(&cc.egui_ctx, loaded.config.appearance);
             let mut app = AeternaApp::new(&cc.egui_ctx, paths, loaded, log);
-            app.start_background(&cc.egui_ctx, &options);
+            match &options.viewer {
+                Some(path) => app.enter_viewer(&cc.egui_ctx, path),
+                None => {
+                    manage::clean_open_folder();
+                    app.start_background(&cc.egui_ctx, &options);
+                }
+            }
             Ok(Box::new(app))
         }),
     )
@@ -155,6 +164,7 @@ fn wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
 pub enum View {
     Backup,
     Restore,
+    Backups,
     Apps,
     Settings,
     Activity,
@@ -164,6 +174,7 @@ pub enum Screen {
     Main,
     Working,
     Preview(Box<views::preview::PreviewState>),
+    Browse(Box<views::browse::BrowseState>),
     Done(Box<Done>),
 }
 
@@ -172,12 +183,32 @@ pub enum Screen {
 pub enum Done {
     Backup(Result<BackupReport, String>),
     Restore(Result<RestoreReport, String>),
+    Verify(Result<crate::engine::verify::VerifyReport, String>),
+    Delete(Result<crate::engine::manage::DeleteReport, String>),
+    Transfer(Result<crate::engine::manage::TransferReport, String>),
+    Extract(Result<(crate::engine::manage::ExtractReport, PathBuf), String>),
 }
 
-/// A plan waiting for the user's confirmation.
+/// Something waiting for the user's confirmation.
 pub enum Pending {
     Backup(Box<BackupPlan>),
     Restore(Box<RestorePlan>),
+    Delete(Vec<SnapshotInfo>),
+    Transfer(Box<SnapshotInfo>, PathBuf),
+    Extract {
+        snapshot: Box<SnapshotInfo>,
+        /// `None`: everything.
+        files: Option<Vec<crate::engine::snapshots::StoredFile>>,
+        target: PathBuf,
+    },
+}
+
+/// Selection in the Backups view.
+#[derive(Default)]
+pub struct ManageUi {
+    /// Qualified ids of the ticked backups.
+    pub checked: HashSet<String>,
+    pub extract_target: Option<PathBuf>,
 }
 
 pub struct Notice {
@@ -247,6 +278,7 @@ pub enum AfterUnlock {
     EnableEncryption,
     RefreshSnapshots,
     ChangePassphrase,
+    ReplaceRecovery,
     Remember,
 }
 
@@ -255,7 +287,13 @@ pub enum VaultDialog {
         passphrase: String,
         repeat: String,
         remember: bool,
+        options: crate::engine::vault::VaultOptions,
         error: Option<String>,
+    },
+    /// Enter a recovery key to see whether it still unlocks the backups.
+    TestRecovery {
+        secret: String,
+        result: Option<Result<(), String>>,
     },
     ShowRecovery {
         key: String,
@@ -324,7 +362,12 @@ pub struct AeternaApp {
     pub tree: TreeUi,
     pub vault: VaultUi,
     pub schedule: ScheduleUi,
+    pub manage: ManageUi,
+    manage_job: Option<Job<Option<Result<crate::engine::manage::DeleteReport, EngineError>>>>,
     pub background: Option<Background>,
+    /// Opened by double-click on encrypted backups: only browse and restore
+    /// the backups at this folder; the configuration is not changed.
+    pub viewer: Option<PathBuf>,
     config_dirty: bool,
     applied_title: Option<Lang>,
 }
@@ -367,7 +410,10 @@ impl AeternaApp {
             tree: TreeUi::default(),
             vault: VaultUi::default(),
             schedule: ScheduleUi::default(),
+            manage: ManageUi::default(),
+            manage_job: None,
             background: None,
+            viewer: None,
             config_dirty: false,
             applied_title: Some(lang),
         };
@@ -442,6 +488,10 @@ impl AeternaApp {
 
     pub fn save_now(&mut self) {
         self.config_dirty = false;
+        if self.viewer.is_some() {
+            // Browsing someone's backups never changes this computer's settings.
+            return;
+        }
         if let Err(err) = self.config.save(&self.paths.config_file) {
             tracing::error!("configuration could not be saved: {err}");
             self.notify(
@@ -512,15 +562,19 @@ impl AeternaApp {
                     for (view, label) in [
                         (View::Backup, t.nav_backup),
                         (View::Restore, t.nav_restore),
+                        (View::Backups, t.nav_backups),
                         (View::Apps, t.nav_apps),
                         (View::Settings, t.nav_settings),
                         (View::Activity, t.nav_activity),
                     ] {
+                        if self.viewer.is_some() && !matches!(view, View::Restore | View::Backups) {
+                            continue;
+                        }
                         let selected = self.view == view && matches!(self.screen, Screen::Main);
                         if widgets::nav_tab(ui, label, selected, !busy).clicked() {
                             self.view = view;
                             self.screen = Screen::Main;
-                            if view == View::Restore {
+                            if matches!(view, View::Restore | View::Backups) {
                                 self.refresh_snapshots(ui.ctx());
                             }
                         }
@@ -611,6 +665,7 @@ impl eframe::App for AeternaApp {
     /// Runs before every frame, and also while the window is hidden.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_jobs(ctx);
+        self.poll_manage_job(ctx);
         self.background_tick(ctx);
         self.save_if_dirty();
     }
@@ -620,7 +675,7 @@ impl eframe::App for AeternaApp {
         self.handle_dropped_folders(&ctx);
         self.refresh_running_processes(&ctx);
 
-        if self.applied_title != Some(self.lang) {
+        if self.viewer.is_none() && self.applied_title != Some(self.lang) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(
                 self.lang.t().window_title.to_string(),
             ));
@@ -674,6 +729,7 @@ impl eframe::App for AeternaApp {
 
                 match &self.screen {
                     Screen::Preview(_) => views::preview::show(self, ui),
+                    Screen::Browse(_) => views::browse::show(self, ui),
                     Screen::Working => views::working::show_working(self, ui),
                     Screen::Done(_) => views::working::show_done(self, ui),
                     Screen::Main => {
@@ -684,6 +740,7 @@ impl eframe::App for AeternaApp {
                                 widgets::centered_column(ui, 860.0, |ui| match self.view {
                                     View::Backup => views::backup::show(self, ui),
                                     View::Restore => views::restore::show(self, ui),
+                                    View::Backups => views::backups::show(self, ui),
                                     View::Apps => views::apps::show(self, ui),
                                     View::Settings => views::settings::show(self, ui),
                                     View::Activity => views::activity::show(self, ui),

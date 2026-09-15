@@ -2,8 +2,9 @@
 //!
 //! ```text
 //! <destination>\AeternaVault Encrypted\
-//!   vault.json                   public: format, vault id, wrapped keys (no secrets)
-//!   README.txt                   what this folder is and how to restore it
+//!   vault.json                       public: format, vault id, wrapped keys (no secrets)
+//!   README.txt                       what this folder is and how to open it
+//!   Open with AeternaVault.avault    double-click to browse (if AeternaVault is installed)
 //!   snapshots\2026-09-14 20-00.avs   encrypted backup index (files, registry, header)
 //!   blobs\3f\3fa9…c1.avb             encrypted file contents, named by keyed hash
 //! ```
@@ -19,7 +20,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::crypto::{self, CryptoError, KdfParams, KeySlot, SlotKind, VaultKey};
+use super::crypto::{self, Cipher, CryptoError, KdfParams, KeySlot, SlotKind, VaultKey};
 use crate::platform;
 
 pub const VAULT_DIR: &str = "AeternaVault Encrypted";
@@ -28,6 +29,8 @@ pub const SNAPSHOT_DIR: &str = "snapshots";
 pub const BLOB_DIR: &str = "blobs";
 pub const SNAPSHOT_EXT: &str = "avs";
 pub const BLOB_EXT: &str = "avb";
+/// The small file that opens a vault by double-click (see `platform::file_association`).
+pub const OPEN_FILE: &str = "Open with AeternaVault.avault";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultHeader {
@@ -37,6 +40,39 @@ pub struct VaultHeader {
     pub cipher: String,
     pub key_check: String,
     pub slots: Vec<KeySlot>,
+}
+
+impl VaultHeader {
+    /// The data cipher; an unknown name means a newer, unsupported format.
+    pub fn data_cipher(&self) -> Result<Cipher, CryptoError> {
+        Cipher::from_header_name(&self.cipher).ok_or_else(|| {
+            CryptoError::Io(io::Error::other(format!(
+                "this vault uses a newer format ({}); please update AeternaVault",
+                self.cipher
+            )))
+        })
+    }
+
+    pub fn slot(&self, kind: SlotKind) -> Option<&KeySlot> {
+        self.slots.iter().find(|s| s.kind == kind)
+    }
+}
+
+/// Choices made when a vault is created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VaultOptions {
+    pub cipher: Cipher,
+    /// Key derivation for the passphrase.
+    pub kdf: KdfParams,
+}
+
+impl Default for VaultOptions {
+    fn default() -> Self {
+        Self {
+            cipher: Cipher::default(),
+            kdf: KdfParams::PASSPHRASE,
+        }
+    }
 }
 
 pub fn vault_dir(destination: &Path) -> PathBuf {
@@ -52,13 +88,45 @@ pub fn read_header(destination: &Path) -> io::Result<VaultHeader> {
     serde_json::from_str(&text).map_err(io::Error::other)
 }
 
+/// The destination that belongs to a path someone opened: the destination
+/// itself, the vault folder, `vault.json`, the `.avault` file, a snapshot
+/// `.avs` file or a plain backup folder.
+pub fn destination_for_opened(path: &Path) -> Option<PathBuf> {
+    for candidate in path.ancestors() {
+        if exists(candidate) || super::snapshots::contains_backups(candidate) {
+            return Some(candidate.to_path_buf());
+        }
+        if candidate
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(VAULT_DIR))
+            && candidate.join(VAULT_FILE).is_file()
+        {
+            return candidate.parent().map(Path::to_path_buf);
+        }
+    }
+    None
+}
+
 /// Unlocks with a passphrase or a recovery key (tries every slot).
 pub fn unlock(destination: &Path, secret: &str) -> Result<(VaultHeader, VaultKey), CryptoError> {
     let header = read_header(destination)?;
+    let (key, _) = open_slots(&header, secret)?;
+    Ok((header, key))
+}
+
+/// Which kind of secret was entered, without keeping the key (used to test a
+/// recovery key).
+pub fn check_secret(destination: &Path, secret: &str) -> Result<SlotKind, CryptoError> {
+    let header = read_header(destination)?;
+    open_slots(&header, secret).map(|(_, kind)| kind)
+}
+
+fn open_slots(header: &VaultHeader, secret: &str) -> Result<(VaultKey, SlotKind), CryptoError> {
+    let cipher = header.data_cipher()?;
     let mut last_error = CryptoError::WrongKey;
     for slot in &header.slots {
-        match slot.open(secret) {
-            Ok(key) if key.fingerprint() == header.key_check => return Ok((header, key)),
+        match slot.open(secret, cipher) {
+            Ok(key) if key.fingerprint() == header.key_check => return Ok((key, slot.kind)),
             Ok(_) => last_error = CryptoError::Damaged,
             Err(CryptoError::WrongKey) => {}
             Err(err) => last_error = err,
@@ -75,19 +143,18 @@ pub struct NewVault {
 }
 
 /// Creates a new vault. Fails if one already exists at the destination.
-pub fn create(destination: &Path, passphrase: &str) -> Result<NewVault, CryptoError> {
-    create_with(
-        destination,
-        passphrase,
-        KdfParams::PASSPHRASE,
-        KdfParams::RECOVERY,
-    )
+pub fn create(
+    destination: &Path,
+    passphrase: &str,
+    options: VaultOptions,
+) -> Result<NewVault, CryptoError> {
+    create_with(destination, passphrase, options, KdfParams::RECOVERY)
 }
 
 pub(crate) fn create_with(
     destination: &Path,
     passphrase: &str,
-    passphrase_kdf: KdfParams,
+    options: VaultOptions,
     recovery_kdf: KdfParams,
 ) -> Result<NewVault, CryptoError> {
     let dir = vault_dir(destination);
@@ -100,21 +167,21 @@ pub(crate) fn create_with(
     fs::create_dir_all(dir.join(SNAPSHOT_DIR))?;
     fs::create_dir_all(dir.join(BLOB_DIR))?;
 
-    let key = VaultKey::generate();
+    let key = VaultKey::generate(options.cipher);
     let recovery_key = crypto::new_recovery_key();
     let header = VaultHeader {
         format: 1,
         vault_id: crypto::hex(&crypto::random_bytes::<8>()),
         created_at: Utc::now(),
-        cipher: "argon2id+xchacha20poly1305-stream-1mib".into(),
+        cipher: options.cipher.header_name().into(),
         key_check: key.fingerprint(),
         slots: vec![
-            KeySlot::create(SlotKind::Passphrase, passphrase, &key, passphrase_kdf)?,
+            KeySlot::create(SlotKind::Passphrase, passphrase, &key, options.kdf)?,
             KeySlot::create(SlotKind::RecoveryKey, &recovery_key, &key, recovery_kdf)?,
         ],
     };
     write_header(destination, &header)?;
-    fs::write(dir.join("README.txt"), README)?;
+    ensure_guide_files(destination);
     Ok(NewVault {
         header,
         key,
@@ -132,28 +199,65 @@ fn write_header(destination: &Path, header: &VaultHeader) -> io::Result<()> {
     fs::rename(tmp, dir.join(VAULT_FILE))
 }
 
-/// Replaces the passphrase slot. The recovery key and all data stay valid.
+/// Writes `README.txt` and the double-click file if they are missing.
+pub fn ensure_guide_files(destination: &Path) {
+    let dir = vault_dir(destination);
+    for (name, content) in [("README.txt", README), (OPEN_FILE, OPEN_FILE_CONTENT)] {
+        let path = dir.join(name);
+        if !path.exists()
+            && let Err(err) = fs::write(&path, content)
+        {
+            tracing::debug!("could not write {}: {err}", path.display());
+        }
+    }
+}
+
+fn checked_header(destination: &Path, key: &VaultKey) -> Result<VaultHeader, CryptoError> {
+    let header = read_header(destination)?;
+    if header.key_check != key.fingerprint() {
+        return Err(CryptoError::WrongKey);
+    }
+    Ok(header)
+}
+
+/// Replaces the passphrase slot. The recovery key and all data stay valid; the
+/// key derivation strength stays as chosen.
 pub fn change_passphrase(
     destination: &Path,
     key: &VaultKey,
     new_passphrase: &str,
 ) -> Result<(), CryptoError> {
-    let mut header = read_header(destination)?;
-    if header.key_check != key.fingerprint() {
-        return Err(CryptoError::WrongKey);
-    }
+    let mut header = checked_header(destination, key)?;
+    let kdf = header
+        .slot(SlotKind::Passphrase)
+        .map(|s| s.kdf)
+        .unwrap_or(KdfParams::PASSPHRASE);
     header.slots.retain(|s| s.kind != SlotKind::Passphrase);
     header.slots.insert(
         0,
-        KeySlot::create(
-            SlotKind::Passphrase,
-            new_passphrase,
-            key,
-            KdfParams::PASSPHRASE,
-        )?,
+        KeySlot::create(SlotKind::Passphrase, new_passphrase, key, kdf)?,
     );
     write_header(destination, &header)?;
     Ok(())
+}
+
+/// Creates a new recovery key; the old one stops working. Returns the new key.
+pub fn replace_recovery_key(destination: &Path, key: &VaultKey) -> Result<String, CryptoError> {
+    let mut header = checked_header(destination, key)?;
+    let recovery_key = crypto::new_recovery_key();
+    let kdf = header
+        .slot(SlotKind::RecoveryKey)
+        .map(|s| s.kdf)
+        .unwrap_or(KdfParams::RECOVERY);
+    header.slots.retain(|s| s.kind != SlotKind::RecoveryKey);
+    header.slots.push(KeySlot::create(
+        SlotKind::RecoveryKey,
+        &recovery_key,
+        key,
+        kdf,
+    )?);
+    write_header(destination, &header)?;
+    Ok(recovery_key)
 }
 
 pub fn blob_path(destination: &Path, id: &str) -> PathBuf {
@@ -190,7 +294,7 @@ pub fn remembered_key(key_dir: &Path, header: &VaultHeader) -> Option<VaultKey> 
     let protected = fs::read(remembered_key_file(key_dir, &header.vault_id)).ok()?;
     let bytes = platform::unprotect_for_user(&protected).ok()?;
     let master: [u8; 32] = bytes.as_slice().try_into().ok()?;
-    let key = VaultKey::from_master(master);
+    let key = VaultKey::from_master(master, header.data_cipher().ok()?);
     (key.fingerprint() == header.key_check).then_some(key)
 }
 
@@ -212,58 +316,97 @@ AeternaVault encrypted backups
 This folder contains backups encrypted with AeternaVault. File names and
 contents cannot be read without the passphrase or the recovery key.
 
-To restore:
-  1. Install AeternaVault (https://github.com/baba537/AeternaVault/releases).
-  2. Choose the folder that contains this folder as the destination.
-  3. Open Restore, select a backup and unlock it with your passphrase or
-     recovery key.
+To look inside or restore:
+  * With AeternaVault installed: double-click \"Open with AeternaVault.avault\"
+    (or choose the folder above this one as destination in AeternaVault),
+    enter the passphrase or recovery key, then browse, open or copy files.
+  * Without installing: download AeternaVault.exe and run
+      AeternaVault.exe restore latest --destination \"<folder above this one>\" --to D:\\Restored
+  * Without AeternaVault at all: the format is openly documented, and
+    tools/aeterna-decrypt.py in the repository decrypts it with Python.
+
+  https://github.com/baba537/AeternaVault
 
 Please copy or synchronise the whole folder. Do not rename or delete single
 files: they are shared between backups.
+";
 
-The format is described in docs/ENCRYPTION.md in the AeternaVault repository.
+const OPEN_FILE_CONTENT: &str = "\
+AeternaVault vault
+Double-click this file to open the encrypted backups in this folder with
+AeternaVault. See README.txt.
 ";
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn test_options(cipher: Cipher) -> VaultOptions {
+        VaultOptions {
+            cipher,
+            kdf: KdfParams::TEST,
+        }
+    }
+
     #[test]
-    fn create_unlock_and_change_passphrase() {
-        let tmp = tempfile::tempdir().unwrap();
-        let created = create_with(
-            tmp.path(),
-            "first passphrase",
-            KdfParams::TEST,
-            KdfParams::TEST,
-        )
-        .unwrap();
-        assert!(exists(tmp.path()));
-        assert!(matches!(
-            unlock(tmp.path(), "nope"),
-            Err(CryptoError::WrongKey)
-        ));
+    fn create_unlock_change_passphrase_and_recovery_key() {
+        for cipher in Cipher::ALL {
+            let tmp = tempfile::tempdir().unwrap();
+            let created = create_with(
+                tmp.path(),
+                "first passphrase",
+                test_options(cipher),
+                KdfParams::TEST,
+            )
+            .unwrap();
+            assert!(exists(tmp.path()));
+            assert!(vault_dir(tmp.path()).join(OPEN_FILE).is_file());
+            assert!(matches!(
+                unlock(tmp.path(), "nope"),
+                Err(CryptoError::WrongKey)
+            ));
 
-        let (_, key) = unlock(tmp.path(), "first passphrase").unwrap();
-        assert_eq!(key.master_bytes(), created.key.master_bytes());
-        let (_, key) = unlock(tmp.path(), &created.recovery_key).unwrap();
-        assert_eq!(key.master_bytes(), created.key.master_bytes());
+            let (header, key) = unlock(tmp.path(), "first passphrase").unwrap();
+            assert_eq!(header.data_cipher().unwrap(), cipher);
+            assert_eq!(key.cipher(), cipher);
+            assert_eq!(key.master_bytes(), created.key.master_bytes());
+            assert_eq!(
+                check_secret(tmp.path(), &created.recovery_key).unwrap(),
+                SlotKind::RecoveryKey
+            );
 
-        change_passphrase(tmp.path(), &key, "second passphrase").unwrap();
-        assert!(unlock(tmp.path(), "first passphrase").is_err());
-        assert!(unlock(tmp.path(), "second passphrase").is_ok());
-        assert!(unlock(tmp.path(), &created.recovery_key).is_ok());
+            change_passphrase(tmp.path(), &key, "second passphrase").unwrap();
+            assert!(unlock(tmp.path(), "first passphrase").is_err());
+            assert!(unlock(tmp.path(), "second passphrase").is_ok());
+            assert!(unlock(tmp.path(), &created.recovery_key).is_ok());
+
+            let new_recovery = replace_recovery_key(tmp.path(), &key).unwrap();
+            assert!(unlock(tmp.path(), &created.recovery_key).is_err());
+            assert!(unlock(tmp.path(), &new_recovery).is_ok());
+            assert!(unlock(tmp.path(), "second passphrase").is_ok());
+
+            // Opening any path inside finds the destination again.
+            let avs = vault_dir(tmp.path()).join(SNAPSHOT_DIR).join("x.avs");
+            assert_eq!(destination_for_opened(&avs).as_deref(), Some(tmp.path()));
+        }
     }
 
     #[cfg(windows)]
     #[test]
     fn remembered_key_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
-        let created = create_with(tmp.path(), "pass", KdfParams::TEST, KdfParams::TEST).unwrap();
+        let created = create_with(
+            tmp.path(),
+            "pass",
+            test_options(Cipher::Aes256Gcm),
+            KdfParams::TEST,
+        )
+        .unwrap();
         let keys = tmp.path().join("keys");
         remember_key(&keys, &created.header, &created.key).unwrap();
         let loaded = remembered_key(&keys, &created.header).unwrap();
         assert_eq!(loaded.master_bytes(), created.key.master_bytes());
+        assert_eq!(loaded.cipher(), Cipher::Aes256Gcm);
         forget_key(&keys, &created.header).unwrap();
         assert!(remembered_key(&keys, &created.header).is_none());
     }

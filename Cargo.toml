@@ -65,6 +65,8 @@ sys-locale = "0.3.2"
 
 # Encryption (RustCrypto): Argon2id for passphrases, XChaCha20-Poly1305 for data.
 chacha20poly1305 = "0.11.0"
+# Optional second cipher, chosen when a vault is created.
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
 argon2 = "0.6.0"
 hmac = "0.13.0"
 getrandom = "0.4.3"
@@ -105,6 +107,12 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.chacha20]
+opt-level = 3
+
+[profile.dev.package.aes]
+opt-level = 3
+
+[profile.dev.package.aes-gcm]
 opt-level = 3
 
 [profile.release]

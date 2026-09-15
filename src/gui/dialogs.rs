@@ -94,7 +94,113 @@ fn copied_feedback(ui: &mut Ui, copied_at: Option<f64>, text: &str) {
     }
 }
 
+/// Confirmation before deleting, moving or copying out backups.
+fn manage_confirmation(app: &mut AeternaApp, ui: &mut Ui) {
+    let Some(pending) = &app.pending else {
+        return;
+    };
+    let t = app.lang.t();
+    let lang = app.lang;
+    let mut start = false;
+    let mut cancel = false;
+
+    let modal = egui::Modal::new(egui::Id::new("confirm-manage"))
+        .frame(modal_frame(ui))
+        .show(ui.ctx(), |ui| {
+            let p = *palette(ui);
+            ui.set_max_width(520.0);
+            let (title, body, warning, button): (&str, String, Option<String>, &str) = match pending
+            {
+                Pending::Delete(snapshots) => {
+                    let names: Vec<String> = snapshots
+                        .iter()
+                        .map(|s| views::backups::snapshot_details(app, s).0)
+                        .collect();
+                    (
+                        t.confirm_delete_title,
+                        lang.confirm_delete(&names),
+                        Some(if snapshots.iter().any(|s| s.needs_key()) {
+                            t.confirm_delete_encrypted.to_string()
+                        } else {
+                            t.confirm_delete_plain.to_string()
+                        }),
+                        t.delete_backup,
+                    )
+                }
+                Pending::Transfer(snapshot, target) => (
+                    t.confirm_transfer_title,
+                    lang.confirm_transfer(
+                        &views::backups::snapshot_details(app, snapshot).0,
+                        &target.display().to_string(),
+                    ),
+                    None,
+                    t.move_backup,
+                ),
+                Pending::Extract {
+                    snapshot,
+                    files,
+                    target,
+                } => (
+                    t.confirm_extract_title,
+                    lang.confirm_extract(
+                        files.as_ref().map(Vec::len),
+                        &target.display().to_string(),
+                    ),
+                    snapshot
+                        .needs_key()
+                        .then(|| t.copies_are_decrypted.to_string()),
+                    t.start,
+                ),
+                Pending::Backup(_) | Pending::Restore(_) => return,
+            };
+            heading(ui, title);
+            wrapped(ui, &body, None);
+            if let Some(warning) = warning {
+                ui.add_space(4.0);
+                wrapped(ui, &warning, Some(p.warning));
+            }
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if widgets::button(ui, ButtonKind::Primary, button, true).clicked() {
+                        start = true;
+                    }
+                    if widgets::button(ui, ButtonKind::Secondary, t.cancel, true).clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        });
+    if modal.should_close() && !start {
+        cancel = true;
+    }
+    let ctx = ui.ctx().clone();
+    if start {
+        match app.pending.take() {
+            Some(Pending::Delete(snapshots)) => app.start_delete(&ctx, snapshots),
+            Some(Pending::Transfer(snapshot, target)) => {
+                app.start_transfer(&ctx, *snapshot, target)
+            }
+            Some(Pending::Extract {
+                snapshot,
+                files,
+                target,
+            }) => app.start_extract(&ctx, *snapshot, files, target, false),
+            other => app.pending = other,
+        }
+    } else if cancel {
+        app.pending = None;
+    }
+}
+
 pub fn confirmation(app: &mut AeternaApp, ui: &mut Ui) {
+    if matches!(
+        app.pending,
+        Some(Pending::Delete(_) | Pending::Transfer(..) | Pending::Extract { .. })
+    ) {
+        manage_confirmation(app, ui);
+        return;
+    }
     let Some(pending) = &app.pending else {
         return;
     };
@@ -128,6 +234,7 @@ pub fn confirmation(app: &mut AeternaApp, ui: &mut Ui) {
                     &plan.running_apps,
                     true,
                 ),
+                _ => return,
             };
             heading(ui, title);
             wrapped(ui, &body, None);
@@ -168,7 +275,7 @@ pub fn confirmation(app: &mut AeternaApp, ui: &mut Ui) {
         1 => match app.pending.take() {
             Some(Pending::Backup(plan)) => app.start_backup(&ctx, plan),
             Some(Pending::Restore(plan)) => app.start_restore(&ctx, plan),
-            None => {}
+            other => app.pending = other,
         },
         2 => match app.pending.take() {
             Some(Pending::Backup(plan)) => {
@@ -178,7 +285,7 @@ pub fn confirmation(app: &mut AeternaApp, ui: &mut Ui) {
                 app.screen =
                     Screen::Preview(Box::new(views::preview::PreviewState::restore(*plan)));
             }
-            None => {}
+            other => app.pending = other,
         },
         3 => app.pending = None,
         _ => {}
@@ -389,6 +496,49 @@ fn time_picker(ui: &mut Ui, time: &mut String) {
     }
 }
 
+/// Choice of cipher and key derivation strength, folded away by default.
+fn encryption_method(
+    ui: &mut Ui,
+    options: &mut crate::engine::vault::VaultOptions,
+    lang: crate::i18n::Lang,
+) {
+    use crate::engine::crypto::{Cipher, KdfParams};
+    let t = lang.t();
+    let p = *palette(ui);
+    egui::CollapsingHeader::new(egui::RichText::new(t.enc_method_title).color(p.text_secondary))
+        .id_salt("encryption-method")
+        .show(ui, |ui| {
+            for cipher in Cipher::ALL {
+                ui.radio_value(
+                    &mut options.cipher,
+                    cipher,
+                    format!(
+                        "{}{}",
+                        cipher.display_name(),
+                        if cipher == Cipher::default() {
+                            t.recommended_suffix
+                        } else {
+                            ""
+                        }
+                    ),
+                );
+                ui.horizontal(|ui| {
+                    ui.add_space(26.0);
+                    widgets::secondary_text(ui, lang.cipher_hint(cipher));
+                });
+            }
+            ui.add_space(8.0);
+            widgets::secondary_text(ui, t.kdf_title);
+            for (params, label) in [
+                (KdfParams::PASSPHRASE, t.kdf_standard),
+                (KdfParams::STRONG, t.kdf_strong),
+                (KdfParams::VERY_STRONG, t.kdf_very_strong),
+            ] {
+                ui.radio_value(&mut options.kdf, params, label);
+            }
+        });
+}
+
 /// Dialog width that still fits into small windows.
 fn dialog_width(ui: &Ui, wanted: f32) -> f32 {
     wanted
@@ -461,6 +611,7 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
             passphrase,
             repeat,
             remember,
+            options,
             error,
         } => {
             let mut submit = false;
@@ -480,6 +631,9 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
                     }
                     ui.add_space(4.0);
                     ui.checkbox(remember, t.remember_on_computer);
+                    ui.add_space(8.0);
+                    ui.add_space(4.0);
+                    encryption_method(ui, options, lang);
                     ui.add_space(8.0);
                     wrapped(ui, t.enc_warning, Some(p.warning));
                     if let Some(error) = error.as_ref() {
@@ -506,7 +660,7 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
                 if let Some(problem) = app.passphrase_problem(passphrase, repeat) {
                     *error = Some(problem);
                 } else {
-                    match app.create_vault(passphrase, *remember) {
+                    match app.create_vault(passphrase, *remember, *options) {
                         Ok(key) => {
                             next = Some(VaultDialog::ShowRecovery {
                                 key,
@@ -652,6 +806,57 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
                     }
                     Err(message) => *error = Some(message),
                 }
+            }
+        }
+
+        VaultDialog::TestRecovery { secret, result } => {
+            let mut submit = false;
+            let modal = egui::Modal::new(egui::Id::new("vault-test-recovery"))
+                .frame(frame)
+                .show(&ctx, |ui| {
+                    let p = *palette(ui);
+                    ui.set_width(dialog_width(ui, 500.0));
+                    heading(ui, t.test_recovery_title);
+                    wrapped(ui, t.test_recovery_hint, Some(p.text_secondary));
+                    ui.add_space(10.0);
+                    let field = ui.add(
+                        egui::TextEdit::singleline(secret)
+                            .hint_text("XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX")
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY),
+                    );
+                    if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        submit = true;
+                    }
+                    match result.as_ref() {
+                        Some(Ok(())) => wrapped(ui, t.test_recovery_ok, Some(p.success)),
+                        Some(Err(message)) => wrapped(ui, message, Some(p.error)),
+                        None => {}
+                    }
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if widgets::button(ui, ButtonKind::Secondary, t.done, true).clicked() {
+                                keep_open = false;
+                            }
+                            if widgets::button(
+                                ui,
+                                ButtonKind::Primary,
+                                t.test_now,
+                                !secret.trim().is_empty(),
+                            )
+                            .clicked()
+                            {
+                                submit = true;
+                            }
+                        });
+                    });
+                });
+            if modal.should_close() {
+                keep_open = false;
+            }
+            if submit && !secret.trim().is_empty() {
+                *result = Some(app.test_recovery_key(secret));
             }
         }
 

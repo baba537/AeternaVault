@@ -10,15 +10,20 @@
 //! 2. **Execute** ([`backup`], [`restore`]): takes a plan the user has
 //!    confirmed and performs it. All file writing goes through `fsops`.
 //!
+//! Managing backups: [`verify`] (read-only), [`retention`] (read-only choice
+//! of old backups) and [`manage`] (delete, move, clean up).
+//!
 //! Encryption lives in [`crypto`] (primitives) and [`vault`] (on-disk vault).
 
 pub mod backup;
 pub mod crypto;
 pub mod export;
 mod fsops;
+pub mod manage;
 pub mod manifest;
 pub mod plan;
 pub mod restore;
+pub mod retention;
 pub mod scan;
 pub mod selection;
 pub mod snapshots;
@@ -26,6 +31,7 @@ pub mod sources;
 #[cfg(test)]
 mod tests;
 pub mod vault;
+pub mod verify;
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -224,6 +230,8 @@ mod unit_tests {
             ("manifest.rs", include_str!("manifest.rs")),
             ("sources.rs", include_str!("sources.rs")),
             ("selection.rs", include_str!("selection.rs")),
+            ("verify.rs", include_str!("verify.rs")),
+            ("retention.rs", include_str!("retention.rs")),
         ];
         let forbidden = [
             "fs::write",

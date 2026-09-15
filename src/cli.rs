@@ -5,10 +5,12 @@
 //! AeternaVault.exe backup --dry-run       only show what would happen
 //! AeternaVault.exe snapshots              list backups
 //! AeternaVault.exe restore latest --to D:\Restored --dry-run
+//! AeternaVault.exe restore latest --destination E:\AeternaVault --to D:\Restored --yes
+//! AeternaVault.exe open "E:\AeternaVault\AeternaVault Encrypted\Open with AeternaVault.avault"
 //! ```
 //!
-//! Encrypted backups use the key remembered on this computer, or the
-//! passphrase from the environment variable `AETERNAVAULT_PASSPHRASE`.
+//! Encrypted backups use the key remembered on this computer, the passphrase
+//! from the environment variable `AETERNAVAULT_PASSPHRASE`, or ask for it.
 //!
 //! Exit codes: 0 = success, 1 = error, 2 = completed with notes or
 //! confirmation (`--yes`) missing.
@@ -67,10 +69,19 @@ pub enum Command {
         scheduled: bool,
     },
     /// List the backups found at the destination.
-    Snapshots,
+    Snapshots {
+        /// Look in this folder instead of the configured destination.
+        #[arg(long, value_name = "DIR")]
+        destination: Option<PathBuf>,
+    },
     /// Restore a backup: "latest" or a name as shown by `snapshots`.
     Restore {
         snapshot: String,
+        /// Restore from this folder instead of the configured destination
+        /// (e.g. backups copied from another computer). Asks for the passphrase
+        /// of encrypted backups.
+        #[arg(long, value_name = "DIR")]
+        destination: Option<PathBuf>,
         /// Restore into this folder instead of the original locations.
         #[arg(long, value_name = "DIR")]
         to: Option<PathBuf>,
@@ -86,6 +97,31 @@ pub enum Command {
     },
     /// Show where configuration and logs are stored.
     Paths,
+    /// Open backups (a folder, or the "Open with AeternaVault.avault" file) in
+    /// a window to browse them, without changing any settings.
+    Open { path: PathBuf },
+}
+
+/// The key for backups at `destination`: remembered, from the environment, or
+/// typed in (only when a console is attached).
+fn key_for_destination(
+    paths: &AppPaths,
+    config: &crate::config::Config,
+) -> Option<crate::engine::crypto::VaultKey> {
+    if let Some(key) = unattended_key(paths, config) {
+        return Some(key);
+    }
+    if !crate::engine::vault::exists(&config.destination) {
+        return None;
+    }
+    for _ in 0..3 {
+        let secret = platform::read_secret("Passphrase or recovery key: ")?;
+        match crate::engine::vault::unlock(&config.destination, &secret) {
+            Ok((_, key)) => return Some(key),
+            Err(err) => eprintln!("{err}"),
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -127,8 +163,16 @@ pub fn run(command: Command, paths: &AppPaths, loaded: Loaded) -> ExitCode {
             ExitCode::SUCCESS
         }
 
-        Command::Snapshots => {
-            let key = unattended_key(paths, &config);
+        Command::Open { .. } => {
+            eprintln!("error: `open` starts a window; run it without a console redirect");
+            ExitCode::FAILURE
+        }
+
+        Command::Snapshots { destination } => {
+            if let Some(destination) = destination {
+                config.destination = destination;
+            }
+            let key = key_for_destination(paths, &config);
             match snapshots::list(&config.destination, key.as_ref()) {
                 Ok(list) if list.is_empty() => {
                     println!("No backups found in {}", config.destination.display());
@@ -261,12 +305,16 @@ pub fn run(command: Command, paths: &AppPaths, loaded: Loaded) -> ExitCode {
 
         Command::Restore {
             snapshot,
+            destination,
             to,
             dry_run,
             yes,
             conflict,
         } => {
-            let key = unattended_key(paths, &config);
+            if let Some(destination) = destination {
+                config.destination = destination;
+            }
+            let key = key_for_destination(paths, &config);
             let info =
                 match snapshots::find(&config.destination, &snapshot, &computer, key.as_ref()) {
                     Ok(info) => info,

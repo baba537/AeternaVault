@@ -68,6 +68,13 @@ pub struct Source {
     pub include_paths: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub exclude_paths: Vec<String>,
+    /// With encryption of selected items: sub-folders and files (or `"."`)
+    /// that are encrypted. The nearest entry wins, like the selection above.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub encrypt_paths: Vec<String>,
+    /// Exceptions inside encrypted folders that stay unencrypted.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub plain_paths: Vec<String>,
 }
 
 impl Default for Source {
@@ -79,6 +86,8 @@ impl Default for Source {
             exclude: Vec::new(),
             include_paths: Vec::new(),
             exclude_paths: Vec::new(),
+            encrypt_paths: Vec::new(),
+            plain_paths: Vec::new(),
         }
     }
 }
@@ -277,6 +286,34 @@ fn schedules_compat<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Schedu
     })
 }
 
+/// Removing old backups automatically.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Retention {
+    /// Apply the rules after every backup.
+    pub enabled: bool,
+    /// Always keep this many of the newest backups.
+    pub keep_last: u32,
+    /// Keep the newest backup of each of the last … days,
+    pub keep_daily: u32,
+    /// … weeks,
+    pub keep_weekly: u32,
+    /// … and months.
+    pub keep_monthly: u32,
+}
+
+impl Default for Retention {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            keep_last: 3,
+            keep_daily: 7,
+            keep_weekly: 4,
+            keep_monthly: 12,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Background {
@@ -296,11 +333,45 @@ impl Default for Background {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EncryptionScope {
+    /// Everything goes into the encrypted vault.
+    #[default]
+    Everything,
+    /// Only marked folders and files (and, if chosen, application settings);
+    /// the rest stays a normal, browsable backup.
+    Selected,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Encryption {
-    /// New backups are written into the encrypted vault at the destination.
+    /// New backups are written (fully or partly) into the encrypted vault.
     pub enabled: bool,
+    pub scope: EncryptionScope,
+    /// With `Selected`: whether application settings are encrypted.
+    pub applications: bool,
+}
+
+impl Default for Encryption {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scope: EncryptionScope::Everything,
+            applications: true,
+        }
+    }
+}
+
+impl Encryption {
+    pub fn everything(&self) -> bool {
+        self.enabled && self.scope == EncryptionScope::Everything
+    }
+
+    pub fn selected(&self) -> bool {
+        self.enabled && self.scope == EncryptionScope::Selected
+    }
 }
 
 /// Optional font overrides. Empty means: use the built-in choice
@@ -327,6 +398,7 @@ pub struct Config {
     /// paths relative to the source, case-insensitive.
     pub exclude: Vec<String>,
     pub encryption: Encryption,
+    pub retention: Retention,
     pub background: Background,
     pub advanced: Advanced,
     pub fonts: Fonts,
@@ -353,6 +425,7 @@ impl Default for Config {
             mode: BackupMode::Incremental,
             exclude: default_excludes(),
             encryption: Encryption::default(),
+            retention: Retention::default(),
             background: Background::default(),
             advanced: Advanced::default(),
             fonts: Fonts::default(),

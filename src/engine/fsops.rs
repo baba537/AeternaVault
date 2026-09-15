@@ -266,6 +266,12 @@ pub fn remove_file(path: &Path) -> io::Result<()> {
     fs::remove_file(path)
 }
 
+/// Only used for backup folders the user chose to delete (when the recycle
+/// bin is not available) and for half-copied folders of AeternaVault itself.
+pub fn remove_dir_all(path: &Path) -> io::Result<()> {
+    fs::remove_dir_all(path)
+}
+
 /// Prevents two backups from writing into the same destination at once, e.g.
 /// an automatic backup starting while one runs from the window.
 pub struct DestinationLock {

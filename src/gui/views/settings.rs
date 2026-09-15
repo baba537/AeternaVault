@@ -9,6 +9,99 @@ use crate::gui::{AeternaApp, theme};
 use crate::i18n::Lang;
 use crate::platform;
 
+/// How the backups are encrypted, where the key is, and how to get at the data
+/// without this app.
+pub fn encryption_info_card(app: &mut AeternaApp, ui: &mut Ui) {
+    let t = app.lang.t();
+    let lang = app.lang;
+    let p = *theme::palette(ui);
+    let Some(header) = app.vault.header.clone() else {
+        return;
+    };
+    let destination = app.config.destination.clone();
+    widgets::card(ui, |ui| {
+        widgets::section_title(ui, t.enc_info_title);
+        let cipher = header
+            .data_cipher()
+            .map(|c| c.display_name())
+            .unwrap_or("?");
+        let kdf = header
+            .slot(crate::engine::crypto::SlotKind::Passphrase)
+            .map(|s| s.kdf);
+        egui::Grid::new("encryption-info")
+            .num_columns(2)
+            .spacing([24.0, 6.0])
+            .show(ui, |ui| {
+                widgets::secondary_text(ui, t.enc_info_cipher);
+                ui.label(lang.cipher_summary(cipher));
+                ui.end_row();
+                widgets::secondary_text(ui, t.enc_info_passphrase);
+                ui.label(match kdf {
+                    Some(kdf) => lang.kdf_summary(kdf.memory_kib, kdf.iterations),
+                    None => "—".to_string(),
+                });
+                ui.end_row();
+                widgets::secondary_text(ui, t.enc_info_hidden);
+                ui.label(t.enc_info_hidden_value);
+                ui.end_row();
+                widgets::secondary_text(ui, t.enc_info_key);
+                ui.label(if app.vault.remembered {
+                    t.enc_info_key_remembered
+                } else {
+                    t.enc_info_key_not_remembered
+                });
+                ui.end_row();
+                widgets::secondary_text(ui, t.enc_info_location);
+                ui.horizontal(|ui| {
+                    let dir = crate::engine::vault::vault_dir(&destination);
+                    ui.label(
+                        egui::RichText::new(dir.display().to_string())
+                            .size(12.5)
+                            .color(p.text_secondary),
+                    );
+                    if widgets::button(ui, ButtonKind::Quiet, "↗", true)
+                        .on_hover_text(t.open_folder)
+                        .clicked()
+                    {
+                        platform::open_in_file_manager(&dir);
+                    }
+                });
+                ui.end_row();
+            });
+        ui.add_space(8.0);
+        egui::CollapsingHeader::new(egui::RichText::new(t.enc_without_app_title).color(p.text))
+            .id_salt("encryption-without-app")
+            .show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(t.enc_without_app_text).size(13.5)).wrap(),
+                );
+                ui.add_space(4.0);
+                let command = format!(
+                    "AeternaVault.exe restore latest --destination \"{}\" --to D:\\Restored",
+                    destination.display()
+                );
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&command).monospace().size(12.5))
+                            .wrap(),
+                    );
+                    if widgets::button(ui, ButtonKind::Quiet, t.copy, true).clicked() {
+                        ui.ctx().copy_text(command.clone());
+                    }
+                });
+                ui.add_space(4.0);
+                ui.add(
+                    egui::Label::new(egui::RichText::new(t.enc_without_app_script).size(13.5))
+                        .wrap(),
+                );
+                ui.hyperlink_to(
+                    "docs/ENCRYPTION.md · tools/aeterna-decrypt.py",
+                    "https://github.com/baba537/AeternaVault/blob/main/docs/ENCRYPTION.md",
+                );
+            });
+    });
+}
+
 pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     let t = app.lang.t();
@@ -88,10 +181,11 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
     ui.add_space(14.0);
 
     widgets::card(ui, |ui| {
-        let p = *theme::palette(ui);
         widgets::section_title(ui, t.enc_settings_title);
-        if app.config.encryption.enabled {
+        if app.config.encryption.everything() {
             widgets::strong_text(ui, t.enc_status_on);
+        } else if app.config.encryption.selected() {
+            widgets::strong_text(ui, t.enc_status_selected);
         } else {
             widgets::secondary_text(ui, t.enc_status_off);
         }
@@ -105,7 +199,7 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                 app.set_remembered(remembered);
             }
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if widgets::button(
                     ui,
                     ButtonKind::Secondary,
@@ -124,6 +218,18 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                         app.open_unlock(crate::gui::AfterUnlock::ChangePassphrase);
                     }
                 }
+                if widgets::button(ui, ButtonKind::Secondary, t.test_recovery, true).clicked() {
+                    app.vault.dialog = Some(crate::gui::VaultDialog::TestRecovery {
+                        secret: String::new(),
+                        result: None,
+                    });
+                }
+                if widgets::button(ui, ButtonKind::Quiet, t.replace_recovery, !app.is_busy())
+                    .on_hover_text(t.replace_recovery_hint)
+                    .clicked()
+                {
+                    app.replace_recovery_key();
+                }
                 if app.vault.key.is_some()
                     && !app.vault.remembered
                     && widgets::button(ui, ButtonKind::Quiet, t.lock_now, true).clicked()
@@ -131,17 +237,26 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                     app.lock_vault(&ctx);
                 }
             });
-            ui.label(
-                egui::RichText::new(
-                    crate::engine::vault::vault_dir(&app.config.destination)
-                        .display()
-                        .to_string(),
-                )
-                .size(12.5)
-                .color(p.text_secondary),
-            );
+        }
+        if platform::file_association::supported() {
+            ui.add_space(8.0);
+            let mut on = platform::file_association::is_registered();
+            if ui.checkbox(&mut on, t.open_by_double_click).changed()
+                && let Err(err) = platform::file_association::set_registered(on)
+            {
+                app.notify(NoticeKind::Error, err.to_string());
+            }
+            ui.horizontal(|ui| {
+                ui.add_space(26.0);
+                widgets::secondary_text(ui, t.open_by_double_click_hint);
+            });
         }
     });
+
+    if app.vault.header.is_some() {
+        ui.add_space(14.0);
+        encryption_info_card(app, ui);
+    }
 
     ui.add_space(14.0);
 

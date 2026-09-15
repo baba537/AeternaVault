@@ -96,6 +96,19 @@ fn folders_card(app: &mut AeternaApp, ui: &mut Ui) {
             if checkbox.changed() {
                 changed = true;
             }
+            if app.config.encryption.selected() {
+                let state = selection::mark_state(&source.encrypt_paths, &source.plain_paths, ".");
+                if widgets::lock_toggle(
+                    &mut row,
+                    state,
+                    &format!("{}: {source_name}", t.encrypt_item),
+                )
+                .clicked()
+                {
+                    selection::toggle_mark(&mut source.encrypt_paths, &mut source.plain_paths, ".");
+                    changed = true;
+                }
+            }
 
             let text_width = (width - 250.0).max(120.0);
             let text_left = row.cursor().left();
@@ -295,6 +308,7 @@ fn render_dir(
     };
     let entries = app.tree_listing(&dir);
     let mut changed = false;
+    let mut marks_changed = false;
 
     if entries.is_empty() && depth == 0 {
         widgets::secondary_text(ui, t.folder_empty);
@@ -352,6 +366,20 @@ fn render_dir(
             selection::toggle(&mut source.include_paths, &mut source.exclude_paths, &rel);
             changed = true;
         }
+        if app.config.encryption.selected() {
+            let source = &mut app.config.sources[index];
+            let mark = selection::mark_state(&source.encrypt_paths, &source.plain_paths, &rel);
+            if widgets::lock_toggle(
+                &mut row,
+                mark,
+                &format!("{}: {}", t.encrypt_item, entry.name),
+            )
+            .clicked()
+            {
+                selection::toggle_mark(&mut source.encrypt_paths, &mut source.plain_paths, &rel);
+                marks_changed = true;
+            }
+        }
 
         paint_entry_icon(&row, entry.is_dir);
         let name_color = if state == CheckState::Unchecked {
@@ -396,6 +424,10 @@ fn render_dir(
             ui.add_space(depth as f32 * 18.0 + 40.0);
             widgets::secondary_text(ui, lang.more_items(entries.len() - TREE_LIMIT));
         });
+    }
+    if marks_changed {
+        // Marks do not change the size, only where things are stored.
+        app.mark_dirty();
     }
     changed
 }
@@ -587,6 +619,74 @@ fn destination_card(app: &mut AeternaApp, ui: &mut Ui) {
                 widgets::secondary_text(ui, hint);
             });
         });
+        if app.config.encryption.enabled {
+            use crate::config::EncryptionScope;
+            ui.indent("encryption-scope", |ui| {
+                let before = app.config.encryption.clone();
+                ui.add_space(4.0);
+                ui.radio_value(
+                    &mut app.config.encryption.scope,
+                    EncryptionScope::Everything,
+                    t.scope_encrypt_everything,
+                );
+                ui.radio_value(
+                    &mut app.config.encryption.scope,
+                    EncryptionScope::Selected,
+                    t.scope_encrypt_selected,
+                );
+                if app.config.encryption.scope == EncryptionScope::Selected {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add_space(26.0);
+                        widgets::lock_icon(
+                            ui,
+                            ui.cursor().left_center() + egui::vec2(6.0, 9.0),
+                            p.accent,
+                        );
+                        ui.add_space(16.0);
+                        widgets::secondary_text(ui, t.scope_selected_hint);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.add_space(22.0);
+                        ui.checkbox(
+                            &mut app.config.encryption.applications,
+                            t.encrypt_app_settings,
+                        );
+                    });
+                    let marked = app
+                        .config
+                        .sources
+                        .iter()
+                        .filter(|s| s.enabled && !s.encrypt_paths.is_empty())
+                        .count();
+                    if marked == 0 && !app.config.encryption.applications {
+                        ui.horizontal(|ui| {
+                            ui.add_space(26.0);
+                            ui.label(
+                                egui::RichText::new(t.scope_nothing_marked)
+                                    .size(13.0)
+                                    .color(p.warning),
+                            );
+                        });
+                    }
+                }
+                if let Some(header) = &app.vault.header {
+                    let cipher = header
+                        .data_cipher()
+                        .map(|c| c.display_name())
+                        .unwrap_or("?");
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        widgets::secondary_text(ui, lang.encryption_in_short(cipher));
+                        if widgets::button(ui, ButtonKind::Quiet, t.how_encrypted, true).clicked() {
+                            app.view = View::Settings;
+                        }
+                    });
+                }
+                if app.config.encryption != before {
+                    app.mark_dirty();
+                }
+            });
+        }
 
         ui.add_space(14.0);
         widgets::section_title(ui, t.mode_title);

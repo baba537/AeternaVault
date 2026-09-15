@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::crypto::{KdfParams, VaultKey};
+use super::crypto::{Cipher, KdfParams, VaultKey};
 use super::manifest::META_DIR;
 use super::plan::{
     self, BackupInput, BackupPlan, ItemKind, Plan, RestoreOptions, RestorePlan, RestoreTarget,
@@ -274,7 +274,10 @@ fn encrypted_backup_hides_names_deduplicates_and_restores() {
     let created = vault::create_with(
         &config.destination,
         "secret words",
-        KdfParams::TEST,
+        vault::VaultOptions {
+            cipher: Cipher::XChaCha20Poly1305,
+            kdf: KdfParams::TEST,
+        },
         KdfParams::TEST,
     )
     .unwrap();
@@ -342,9 +345,195 @@ fn encrypted_backup_hides_names_deduplicates_and_restores() {
     );
 
     // Wrong key cannot read the index.
-    let wrong = VaultKey::generate();
+    let wrong = VaultKey::generate(Cipher::default());
     let listed = snapshots::list(&config.destination, Some(&wrong)).unwrap();
     assert!(listed.iter().all(|s| s.header.is_none()));
+}
+
+#[test]
+fn partly_encrypted_backup_keeps_marked_files_in_the_vault() {
+    let (tmp, source, mut config) = setup();
+    let created = vault::create_with(
+        &config.destination,
+        "secret words",
+        vault::VaultOptions {
+            cipher: Cipher::Aes256Gcm,
+            kdf: KdfParams::TEST,
+        },
+        KdfParams::TEST,
+    )
+    .unwrap();
+    let key = created.key;
+    config.encryption.enabled = true;
+    config.encryption.scope = crate::config::EncryptionScope::Selected;
+    config.sources[0].encrypt_paths = vec!["photos".into()];
+
+    let plan1 = plan(&config, Some(&key));
+    assert!(plan1.plain_part && plan1.encrypted_part);
+    let report = run(&plan1, Some(&key));
+    assert!(report.header.split && !report.header.encrypted);
+    assert_eq!(report.header.stats.files, 1);
+    assert_eq!(report.encrypted_part.as_ref().unwrap().stats.files, 1);
+    assert!(report.snapshot_dir.join("Documents/letter.txt").is_file());
+    assert!(!report.snapshot_dir.join("Documents/photos").exists());
+    for file in list_all_files(&vault::vault_dir(&config.destination)) {
+        assert!(!file.display().to_string().contains("summer"));
+    }
+
+    // One entry in the list, with its encrypted part attached.
+    let listed = snapshots::list(&config.destination, None).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].is_split() && listed[0].needs_unlock());
+
+    // Nothing changed: nothing is copied in either part.
+    let report2 = run(&plan(&config, Some(&key)), Some(&key));
+    assert_eq!(report2.total_stats().copied_files, 0);
+
+    // Unmarking the folder moves the photos into the plain part.
+    config.sources[0].encrypt_paths.clear();
+    let plan3 = plan(&config, Some(&key));
+    assert!(plan3.plain_part && !plan3.encrypted_part);
+    let report3 = run(&plan3, Some(&key));
+    assert!(
+        report3
+            .snapshot_dir
+            .join("Documents/photos/summer.jpg")
+            .is_file()
+    );
+    assert_eq!(
+        report3.header.stats.copied_files, 1,
+        "only the photo is new here"
+    );
+
+    // Restoring the partly encrypted backup needs the key and brings back both.
+    let all = snapshots::list(&config.destination, Some(&key)).unwrap();
+    let split = all.iter().find(|s| s.is_split()).unwrap().clone();
+    let options = || RestoreOptions {
+        target: RestoreTarget::Folder(tmp.path().join("Restored")),
+        conflict: ConflictPolicy::ReplaceChanged,
+        verify: true,
+        skip: HashSet::new(),
+    };
+    let locked = snapshots::list(&config.destination, None).unwrap();
+    let locked_split = locked.iter().find(|s| s.is_split()).unwrap();
+    assert!(matches!(
+        plan::plan_restore(
+            locked_split,
+            options(),
+            None,
+            Vec::new(),
+            &CancelToken::default(),
+            &mut quiet()
+        ),
+        Err(crate::error::EngineError::Locked)
+    ));
+    let restore_plan = plan::plan_restore(
+        &split,
+        options(),
+        Some(&key),
+        Vec::new(),
+        &CancelToken::default(),
+        &mut quiet(),
+    )
+    .unwrap();
+    let result = restore::run_restore(
+        &restore_plan,
+        Some(&key),
+        &CancelToken::default(),
+        &mut quiet(),
+    )
+    .unwrap();
+    assert_eq!(result.restored_files, 2);
+    let restored = tmp.path().join("Restored").join("Documents");
+    assert_eq!(
+        fs::read_to_string(restored.join("photos/summer.jpg")).unwrap(),
+        "not really a jpeg"
+    );
+    let _ = source;
+}
+
+#[test]
+fn delete_verify_and_move_backups() {
+    use super::{manage, verify};
+    let (tmp, _source, mut config) = setup();
+    // Without hard links, the second backup points into the first one.
+    config.advanced.hardlink_unchanged = false;
+    let first = run(&plan(&config, None), None);
+    let second = run(&plan(&config, None), None);
+    assert_eq!(second.header.stats.referenced_files, 2);
+
+    let delete_report = manage::delete(
+        &config.destination,
+        std::slice::from_ref(&first.header.id),
+        None,
+        &CancelToken::default(),
+        &mut quiet(),
+    )
+    .unwrap();
+    assert_eq!(delete_report.rehomed_files, 2);
+    assert!(!first.snapshot_dir.exists());
+    let listed = snapshots::list(&config.destination, None).unwrap();
+    assert_eq!(listed.len(), 1);
+    let check = verify::verify(&listed[0], None, &CancelToken::default(), &mut quiet()).unwrap();
+    assert!(check.is_ok(), "{check:?}");
+    assert!(second.snapshot_dir.join("Documents/letter.txt").is_file());
+
+    // Damage is found without restoring.
+    fs::write(second.snapshot_dir.join("Documents/letter.txt"), "tampered").unwrap();
+    let check = verify::verify(&listed[0], None, &CancelToken::default(), &mut quiet()).unwrap();
+    assert_eq!(check.damaged, vec!["Documents/letter.txt".to_string()]);
+    fs::write(
+        second.snapshot_dir.join("Documents/letter.txt"),
+        "Dear archive,",
+    )
+    .unwrap();
+
+    // An encrypted backup moves together with the vault header; its content
+    // is removed from the old place.
+    let created = vault::create_with(
+        &config.destination,
+        "secret words",
+        vault::VaultOptions {
+            cipher: Cipher::XChaCha20Poly1305,
+            kdf: KdfParams::TEST,
+        },
+        KdfParams::TEST,
+    )
+    .unwrap();
+    let key = created.key;
+    config.encryption.enabled = true;
+    run(&plan(&config, Some(&key)), Some(&key));
+    let other = tmp.path().join("Other place");
+    let listed = snapshots::list(&config.destination, Some(&key)).unwrap();
+    let encrypted = listed.iter().find(|s| s.is_encrypted()).unwrap();
+    let moved = manage::transfer(
+        encrypted,
+        &other,
+        Some(&key),
+        &CancelToken::default(),
+        &mut quiet(),
+    )
+    .unwrap();
+    assert_eq!(moved.files, 2);
+    assert_eq!(moved.delete.pruned_blobs, 2);
+    let there = snapshots::list(&other, Some(&key)).unwrap();
+    assert_eq!(there.len(), 1);
+    assert!(there[0].header.is_some(), "readable with the same key");
+    assert!(vault::unlock(&other, "secret words").is_ok());
+
+    // The plain backup moves as well and stays complete.
+    let listed = snapshots::list(&config.destination, None).unwrap();
+    let plain = listed.iter().find(|s| !s.is_encrypted()).unwrap();
+    manage::transfer(plain, &other, None, &CancelToken::default(), &mut quiet()).unwrap();
+    let there = snapshots::list(&other, Some(&key)).unwrap();
+    let plain_there = there.iter().find(|s| !s.is_encrypted()).unwrap();
+    let check = verify::verify(plain_there, None, &CancelToken::default(), &mut quiet()).unwrap();
+    assert!(check.is_ok() && check.files == 2, "{check:?}");
+    assert!(
+        snapshots::list(&config.destination, Some(&key))
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

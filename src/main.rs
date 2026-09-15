@@ -50,6 +50,18 @@ fn main() -> ExitCode {
     let Some(command) = args.command else {
         return run_window(paths, loaded, log, args.background);
     };
+    if let cli::Command::Open { path } = command {
+        return open_window(
+            paths,
+            loaded,
+            log,
+            gui::StartOptions {
+                hidden: false,
+                instance_key: String::new(),
+                viewer: Some(path),
+            },
+        );
+    }
     cli::run(command, &paths, loaded)
 }
 
@@ -76,7 +88,17 @@ fn run_window(
     let options = gui::StartOptions {
         hidden: background,
         instance_key: key,
+        viewer: None,
     };
+    open_window(paths, loaded, log, options)
+}
+
+fn open_window(
+    paths: paths::AppPaths,
+    loaded: config::Loaded,
+    log: logging::Logging,
+    options: gui::StartOptions,
+) -> ExitCode {
     match gui::run(paths, loaded, log.buffer.clone(), options) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {

@@ -11,6 +11,38 @@ use crate::i18n::Lang;
 use crate::platform::apps::Catalog;
 use crate::platform::known_paths::KnownPaths;
 
+/// Which files of a source are encrypted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EncryptRule {
+    Never,
+    Always,
+    /// Marked sub-folders and files (see [`super::selection::is_marked`]).
+    Marked {
+        marked: Vec<String>,
+        unmarked: Vec<String>,
+    },
+}
+
+impl EncryptRule {
+    pub fn applies(&self, rel: &str) -> bool {
+        match self {
+            EncryptRule::Never => false,
+            EncryptRule::Always => true,
+            EncryptRule::Marked { marked, unmarked } => {
+                super::selection::is_marked(marked, unmarked, rel)
+            }
+        }
+    }
+
+    pub fn may_apply(&self) -> bool {
+        match self {
+            EncryptRule::Never => false,
+            EncryptRule::Always => true,
+            EncryptRule::Marked { marked, .. } => !marked.is_empty(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BackupSource {
     /// Folder inside the snapshot, `/`-separated.
@@ -22,6 +54,7 @@ pub struct BackupSource {
     pub excludes: Vec<String>,
     pub include_paths: Vec<String>,
     pub exclude_paths: Vec<String>,
+    pub encrypt: EncryptRule,
 }
 
 #[derive(Debug, Clone)]
@@ -29,12 +62,15 @@ pub struct RegistrySource {
     pub app: String,
     pub app_name: String,
     pub key: String,
+    pub encrypted: bool,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Sources {
     pub folders: Vec<BackupSource>,
     pub registry: Vec<RegistrySource>,
+    /// Where the list of installed programs goes.
+    pub program_list_encrypted: bool,
 }
 
 impl Sources {
@@ -42,8 +78,33 @@ impl Sources {
         self.folders.is_empty() && self.registry.is_empty()
     }
 
+    /// Whether anything of this backup is going to be encrypted.
+    pub fn may_encrypt(&self) -> bool {
+        self.program_list_encrypted
+            || self.folders.iter().any(|f| f.encrypt.may_apply())
+            || self.registry.iter().any(|r| r.encrypted)
+    }
+
     pub fn collect(config: &Config, catalog: &Catalog, known: &KnownPaths, lang: Lang) -> Self {
-        let mut sources = Sources::default();
+        let encryption = &config.encryption;
+        let folder_rule = |source: &crate::config::Source| {
+            if encryption.everything() {
+                EncryptRule::Always
+            } else if encryption.selected() && !source.encrypt_paths.is_empty() {
+                EncryptRule::Marked {
+                    marked: source.encrypt_paths.clone(),
+                    unmarked: source.plain_paths.clone(),
+                }
+            } else {
+                EncryptRule::Never
+            }
+        };
+        let apps_encrypted =
+            encryption.everything() || (encryption.selected() && encryption.applications);
+        let mut sources = Sources {
+            program_list_encrypted: encryption.everything(),
+            ..Sources::default()
+        };
         let mut used = HashSet::new();
         // Reserve the applications folder for application data.
         used.insert(APPS_DIR.to_lowercase());
@@ -66,6 +127,7 @@ impl Sources {
                 excludes: source.exclude.clone(),
                 include_paths: source.include_paths.clone(),
                 exclude_paths: source.exclude_paths.clone(),
+                encrypt: folder_rule(source),
             });
         }
 
@@ -107,6 +169,11 @@ impl Sources {
                     excludes: folder.exclude.clone(),
                     include_paths,
                     exclude_paths,
+                    encrypt: if apps_encrypted {
+                        EncryptRule::Always
+                    } else {
+                        EncryptRule::Never
+                    },
                 });
             }
             for key in app.present_registry_keys() {
@@ -114,6 +181,7 @@ impl Sources {
                     app: app.id.clone(),
                     app_name: app_name.clone(),
                     key: key.to_string(),
+                    encrypted: apps_encrypted,
                 });
             }
         }

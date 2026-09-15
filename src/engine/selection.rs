@@ -172,6 +172,52 @@ pub fn toggle(include: &mut Vec<String>, exclude: &mut Vec<String>, path: &str) 
     }
 }
 
+// ---------------------------------------------------------------------------
+// Encryption marks: the same nearest-decision rule, but nothing is marked
+// unless decided otherwise (the root is implicitly "not marked").
+// ---------------------------------------------------------------------------
+
+fn with_unmarked_root(include: &[String], exclude: &[String]) -> Vec<String> {
+    let mut exclude = exclude.to_vec();
+    let root_decided = include.iter().chain(exclude.iter()).any(|p| key(p) == ROOT);
+    if !root_decided {
+        exclude.push(ROOT.to_string());
+    }
+    exclude
+}
+
+/// Whether `path` is marked (e.g. for encryption).
+pub fn is_marked(marked: &[String], unmarked: &[String], path: &str) -> bool {
+    if marked.is_empty() {
+        return false;
+    }
+    let exclude = with_unmarked_root(marked, unmarked);
+    Selection::new(marked, &exclude).is_included(path)
+}
+
+pub fn mark_state(marked: &[String], unmarked: &[String], path: &str) -> CheckState {
+    let exclude = with_unmarked_root(marked, unmarked);
+    Selection::new(marked, &exclude).state(path)
+}
+
+/// Toggles a mark like a tree checkbox (see [`toggle`]).
+pub fn toggle_mark(marked: &mut Vec<String>, unmarked: &mut Vec<String>, path: &str) {
+    let path = normalize(path);
+    if path == ROOT {
+        let on = mark_state(marked, unmarked, ROOT) != CheckState::Checked;
+        marked.clear();
+        unmarked.clear();
+        if on {
+            marked.push(ROOT.to_string());
+        }
+        return;
+    }
+    let mut exclude = with_unmarked_root(marked, unmarked);
+    toggle(marked, &mut exclude, &path);
+    exclude.retain(|p| key(p) != ROOT);
+    *unmarked = exclude;
+}
+
 pub fn select_all(include: &mut Vec<String>, exclude: &mut Vec<String>) {
     include.clear();
     exclude.clear();
@@ -219,6 +265,32 @@ mod tests {
         // Checking the mixed root selects everything again.
         toggle(&mut include, &mut exclude, ".");
         assert!(include.is_empty() && exclude.is_empty());
+    }
+
+    #[test]
+    fn marks_start_unmarked_and_toggle_like_the_tree() {
+        let mut marked = Vec::new();
+        let mut unmarked = Vec::new();
+        assert!(!is_marked(&marked, &unmarked, "Taxes/2025.pdf"));
+
+        toggle_mark(&mut marked, &mut unmarked, "Taxes");
+        assert_eq!(marked, vec!["Taxes"]);
+        assert!(unmarked.is_empty());
+        assert!(is_marked(&marked, &unmarked, "taxes/2025.pdf"));
+        assert!(!is_marked(&marked, &unmarked, "Letters/a.txt"));
+        assert_eq!(mark_state(&marked, &unmarked, "."), CheckState::Mixed);
+
+        // An exception inside the marked folder.
+        toggle_mark(&mut marked, &mut unmarked, "Taxes/public.txt");
+        assert!(!is_marked(&marked, &unmarked, "Taxes/public.txt"));
+        assert!(is_marked(&marked, &unmarked, "Taxes/2025.pdf"));
+
+        // Marking the whole folder, then unmarking it again.
+        toggle_mark(&mut marked, &mut unmarked, ".");
+        assert_eq!(marked, vec!["."]);
+        assert!(is_marked(&marked, &unmarked, "Letters/a.txt"));
+        toggle_mark(&mut marked, &mut unmarked, ".");
+        assert!(marked.is_empty() && unmarked.is_empty());
     }
 
     #[test]

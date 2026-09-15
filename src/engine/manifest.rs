@@ -17,6 +17,10 @@
 //!
 //! Format 2, encrypted: see [`super::vault`].
 //!
+//! Partly encrypted backups consist of both: a plain folder and an encrypted
+//! `.avs` index with the same name, each marked with `split: true`. Each
+//! part's index lists only the files stored in that part.
+//!
 //! Format 1 (AeternaVault 0.1): `<destination>\<COMPUTER>\<id>\data\<source>\…`
 //! with `snapshot.json` next to `data`. Still listed and restorable.
 
@@ -101,6 +105,20 @@ pub struct SnapshotStats {
     pub failed: u64,
 }
 
+impl SnapshotStats {
+    pub fn add(&mut self, other: &SnapshotStats) {
+        self.files += other.files;
+        self.bytes += other.bytes;
+        self.copied_files += other.copied_files;
+        self.copied_bytes += other.copied_bytes;
+        self.linked_files += other.linked_files;
+        self.referenced_files += other.referenced_files;
+        self.registry_keys += other.registry_keys;
+        self.skipped += other.skipped;
+        self.failed += other.failed;
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotHeader {
     pub format: u32,
@@ -116,6 +134,9 @@ pub struct SnapshotHeader {
     pub base: Option<String>,
     #[serde(default)]
     pub encrypted: bool,
+    /// Partly encrypted backup: a plain and an encrypted part share the id.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub split: bool,
     pub sources: Vec<SourceRecord>,
     #[serde(default)]
     pub registry: Vec<RegistryRecord>,

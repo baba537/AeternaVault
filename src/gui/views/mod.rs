@@ -3,6 +3,8 @@
 pub mod activity;
 pub mod apps;
 pub mod backup;
+pub mod backups;
+pub mod browse;
 pub mod preview;
 pub mod restore;
 pub mod settings;

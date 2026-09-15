@@ -34,11 +34,13 @@ pub fn run_restore(
 ) -> EngineResult<RestoreReport> {
     let started = Instant::now();
     let (files_total, bytes_total) = plan.write_totals();
-    let encrypted = plan.snapshot.is_encrypted();
+    let encrypted = plan.items.iter().any(|i| i.encrypted);
     if encrypted && key.is_none() {
         return Err(EngineError::Locked);
     }
     let destination = plan.snapshot.destination();
+    // Plain content of a (partly) plain backup.
+    let plain_root = plan.snapshot.parts().find_map(|p| p.blob_root());
 
     let mut report = RestoreReport {
         skipped: plan.summary.count(ItemKind::Skipped) + plan.summary.count(ItemKind::Unchanged),
@@ -84,8 +86,8 @@ pub fn run_restore(
             continue;
         }
 
-        let result = match (key, plan.snapshot.blob_root()) {
-            (Some(key), None) => {
+        let result = match (key.filter(|_| blob.encrypted), plain_root) {
+            (Some(key), _) => {
                 let blob_path = vault::blob_path(&destination, &blob.blob);
                 // Decryption authenticates the content; the checksum is compared as well.
                 fsops::decrypt_blob(
@@ -100,7 +102,7 @@ pub fn run_restore(
                     },
                 )
             }
-            (_, Some(root)) => match safe_relative_path(&blob.blob) {
+            (None, Some(root)) if !blob.encrypted => match safe_relative_path(&blob.blob) {
                 Some(blob_rel) => {
                     let expected = plan.options.verify.then_some(blob.sha256.as_str());
                     fsops::copy_hashed(&root.join(blob_rel), &target, expected, cancel, &mut |n| {
@@ -110,7 +112,7 @@ pub fn run_restore(
                 }
                 None => continue,
             },
-            (None, None) => return Err(EngineError::Locked),
+            _ => return Err(EngineError::Locked),
         };
 
         match result {

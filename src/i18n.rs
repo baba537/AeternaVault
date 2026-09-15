@@ -487,6 +487,255 @@ impl Lang {
         }
     }
 
+    pub fn backups_count(self, n: usize) -> String {
+        match (self, n) {
+            (Lang::En, 1) => "1 backup".to_string(),
+            (Lang::En, n) => format!("{} backups", self.count(n as u64)),
+            (Lang::De, 1) => "1 Sicherung".to_string(),
+            (Lang::De, n) => format!("{} Sicherungen", self.count(n as u64)),
+        }
+    }
+
+    pub fn stored_bytes(self, bytes: u64) -> String {
+        match self {
+            Lang::En => format!("{} stored", self.bytes(bytes)),
+            Lang::De => format!("{} gespeichert", self.bytes(bytes)),
+        }
+    }
+
+    pub fn delete_n(self, n: usize) -> String {
+        match self {
+            Lang::En => format!("Delete {n}…"),
+            Lang::De => format!("{n} löschen…"),
+        }
+    }
+
+    pub fn copy_n_to(self, n: usize) -> String {
+        match self {
+            Lang::En => format!("Copy {n} to…"),
+            Lang::De => format!("{n} kopieren nach…"),
+        }
+    }
+
+    pub fn contents_of(self, title: &str) -> String {
+        match self {
+            Lang::En => format!("Backup of {title}"),
+            Lang::De => format!("Sicherung vom {title}"),
+        }
+    }
+
+    pub fn retention_preview(self, n: usize) -> String {
+        match (self, n) {
+            (Lang::En, 0) => "With these rules, no backup would be removed at the moment.".into(),
+            (Lang::En, 1) => "With these rules, 1 older backup would be removed now.".into(),
+            (Lang::En, n) => format!("With these rules, {n} older backups would be removed now."),
+            (Lang::De, 0) => "Mit diesen Regeln würde zurzeit keine Sicherung entfernt.".into(),
+            (Lang::De, 1) => "Mit diesen Regeln würde jetzt 1 ältere Sicherung entfernt.".into(),
+            (Lang::De, n) => {
+                format!("Mit diesen Regeln würden jetzt {n} ältere Sicherungen entfernt.")
+            }
+        }
+    }
+
+    pub fn retention_removed(self, n: usize) -> String {
+        match (self, n) {
+            (Lang::En, 1) => "1 old backup was removed by the retention rules.".into(),
+            (Lang::En, n) => format!("{n} old backups were removed by the retention rules."),
+            (Lang::De, 1) => "1 alte Sicherung wurde nach den Aufbewahrungsregeln entfernt.".into(),
+            (Lang::De, n) => {
+                format!("{n} alte Sicherungen wurden nach den Aufbewahrungsregeln entfernt.")
+            }
+        }
+    }
+
+    pub fn encrypted_part_files(self, n: u64) -> String {
+        match self {
+            Lang::En => format!("{} of them in the encrypted part.", self.files(n)),
+            Lang::De => format!("Davon {} im verschlüsselten Teil.", self.files(n)),
+        }
+    }
+
+    pub fn verify_result(self, files: u64, bytes: u64, duration: std::time::Duration) -> String {
+        match self {
+            Lang::En => format!(
+                "{} with {} read and compared with their checksums in {}.",
+                self.files(files),
+                self.bytes(bytes),
+                self.duration(duration)
+            ),
+            Lang::De => format!(
+                "{} mit {} gelesen und mit ihren Prüfsummen verglichen, in {}.",
+                self.files(files),
+                self.bytes(bytes),
+                self.duration(duration)
+            ),
+        }
+    }
+
+    pub fn verify_problems(self, damaged: usize, missing: usize) -> String {
+        match self {
+            Lang::En => format!(
+                "{damaged} damaged, {missing} missing. The affected files cannot be restored from this backup; an older or newer backup may still have them."
+            ),
+            Lang::De => format!(
+                "{damaged} beschädigt, {missing} fehlend. Die betroffenen Dateien lassen sich aus dieser Sicherung nicht wiederherstellen; eine ältere oder neuere Sicherung hat sie vielleicht noch."
+            ),
+        }
+    }
+
+    pub fn delete_result(self, report: &crate::engine::manage::DeleteReport) -> String {
+        let mut text = match self {
+            Lang::En => format!("{} deleted.", self.backups_count(report.deleted.len())),
+            Lang::De => format!("{} gelöscht.", self.backups_count(report.deleted.len())),
+        };
+        if report.rehomed_files > 0 {
+            text.push(' ');
+            text.push_str(&self.rehomed_note(report.rehomed_files));
+        }
+        if report.freed_bytes > 0 {
+            text.push_str(&match self {
+                Lang::En => format!(
+                    " {} of encrypted data freed.",
+                    self.bytes(report.freed_bytes)
+                ),
+                Lang::De => format!(
+                    " {} verschlüsselte Daten freigegeben.",
+                    self.bytes(report.freed_bytes)
+                ),
+            });
+        }
+        if report.deleted_permanently > 0 {
+            text.push_str(match self {
+                Lang::En => " The drive has no recycle bin, so they were deleted permanently.",
+                Lang::De => {
+                    " Das Laufwerk hat keinen Papierkorb, daher wurden sie endgültig gelöscht."
+                }
+            });
+        }
+        text
+    }
+
+    pub fn rehomed_note(self, n: u64) -> String {
+        match self {
+            Lang::En => format!(
+                "{} still needed by newer backups were copied into them first.",
+                self.files(n)
+            ),
+            Lang::De => format!(
+                "{}, die neuere Sicherungen noch brauchten, wurden vorher dorthin kopiert.",
+                self.files(n)
+            ),
+        }
+    }
+
+    pub fn transfer_result(self, files: u64, bytes: u64, duration: std::time::Duration) -> String {
+        match self {
+            Lang::En => format!(
+                "{} with {} copied and checked in {}; the original was removed.",
+                self.files(files),
+                self.bytes(bytes),
+                self.duration(duration)
+            ),
+            Lang::De => format!(
+                "{} mit {} kopiert und geprüft in {}; das Original wurde entfernt.",
+                self.files(files),
+                self.bytes(bytes),
+                self.duration(duration)
+            ),
+        }
+    }
+
+    pub fn extract_result(self, files: u64, bytes: u64, duration: std::time::Duration) -> String {
+        match self {
+            Lang::En => format!(
+                "{} with {} copied in {}.",
+                self.files(files),
+                self.bytes(bytes),
+                self.duration(duration)
+            ),
+            Lang::De => format!(
+                "{} mit {} kopiert in {}.",
+                self.files(files),
+                self.bytes(bytes),
+                self.duration(duration)
+            ),
+        }
+    }
+
+    pub fn confirm_delete(self, names: &[String]) -> String {
+        let list = self.list_names(names);
+        match self {
+            Lang::En => format!("These backups will be deleted: {list}."),
+            Lang::De => format!("Diese Sicherungen werden gelöscht: {list}."),
+        }
+    }
+
+    pub fn confirm_transfer(self, name: &str, target: &str) -> String {
+        match self {
+            Lang::En => format!(
+                "The backup of {name} is copied to {target} and checked. Only then is the original removed. Newer backups that still need its files keep their own copies."
+            ),
+            Lang::De => format!(
+                "Die Sicherung vom {name} wird nach {target} kopiert und geprüft. Erst danach wird das Original entfernt. Neuere Sicherungen, die noch Dateien daraus brauchen, behalten eigene Kopien."
+            ),
+        }
+    }
+
+    pub fn confirm_extract(self, files: Option<usize>, target: &str) -> String {
+        match (self, files) {
+            (Lang::En, None) => format!("All files of the backup are copied to {target}."),
+            (Lang::En, Some(n)) => format!("{n} files are copied to {target}."),
+            (Lang::De, None) => format!("Alle Dateien der Sicherung werden nach {target} kopiert."),
+            (Lang::De, Some(n)) => format!("{n} Dateien werden nach {target} kopiert."),
+        }
+    }
+
+    pub fn cipher_summary(self, cipher: &str) -> String {
+        match self {
+            Lang::En => format!("{cipher} with 256-bit keys, in 1 MiB authenticated chunks"),
+            Lang::De => {
+                format!("{cipher} mit 256-Bit-Schlüsseln, in authentifizierten 1-MiB-Abschnitten")
+            }
+        }
+    }
+
+    pub fn kdf_summary(self, memory_kib: u32, iterations: u32) -> String {
+        let mib = memory_kib / 1024;
+        match self {
+            Lang::En => format!(
+                "Argon2id with {mib} MiB and {iterations} passes; a recovery key as second way in"
+            ),
+            Lang::De => format!(
+                "Argon2id mit {mib} MiB und {iterations} Durchläufen; ein Wiederherstellungsschlüssel als zweiter Zugang"
+            ),
+        }
+    }
+
+    pub fn encryption_in_short(self, cipher: &str) -> String {
+        match self {
+            Lang::En => format!("{cipher} · key from your passphrase with Argon2id"),
+            Lang::De => format!("{cipher} · Schlüssel aus deiner Passphrase mit Argon2id"),
+        }
+    }
+
+    pub fn cipher_hint(self, cipher: crate::engine::crypto::Cipher) -> &'static str {
+        use crate::engine::crypto::Cipher;
+        match (self, cipher) {
+            (Lang::En, Cipher::XChaCha20Poly1305) => {
+                "Modern and fast on every processor. Used by WireGuard, age and many messengers."
+            }
+            (Lang::De, Cipher::XChaCha20Poly1305) => {
+                "Modern und auf jedem Prozessor schnell. Genutzt von WireGuard, age und vielen Messengern."
+            }
+            (Lang::En, Cipher::Aes256Gcm) => {
+                "The widely standardised choice (FIPS); fast on processors with AES support."
+            }
+            (Lang::De, Cipher::Aes256Gcm) => {
+                "Die weit standardisierte Wahl (FIPS); schnell auf Prozessoren mit AES-Unterstützung."
+            }
+        }
+    }
+
     pub fn autostart_error(self, message: &str) -> String {
         match self {
             Lang::En => format!("Starting with Windows could not be changed: {message}"),
@@ -1005,6 +1254,93 @@ pub struct Tr {
     pub close_hint_title: &'static str,
     pub close_hint_text: &'static str,
     pub legacy_task_removed: &'static str,
+
+    // --- 0.3: encryption method and recovery key ----------------------------------
+    pub enc_method_title: &'static str,
+    pub recommended_suffix: &'static str,
+    pub kdf_title: &'static str,
+    pub kdf_standard: &'static str,
+    pub kdf_strong: &'static str,
+    pub kdf_very_strong: &'static str,
+    pub test_recovery_title: &'static str,
+    pub test_recovery_hint: &'static str,
+    pub test_recovery_ok: &'static str,
+    pub test_recovery_is_passphrase: &'static str,
+    pub test_recovery_wrong: &'static str,
+    pub test_now: &'static str,
+
+    // --- 0.3: managing backups ----------------------------------------------------
+    pub nav_backups: &'static str,
+    pub backups_title: &'static str,
+    pub backups_select_hint: &'static str,
+    pub some_backups_locked: &'static str,
+    pub partly_locked: &'static str,
+    pub partly_encrypted_label: &'static str,
+    pub browse: &'static str,
+    pub check_backup: &'static str,
+    pub copy_files_to: &'static str,
+    pub move_to: &'static str,
+    pub move_backup: &'static str,
+    pub open_folder: &'static str,
+    pub delete_backup: &'static str,
+    pub retention_title: &'static str,
+    pub retention_auto: &'static str,
+    pub retention_hint: &'static str,
+    pub retention_keep: &'static str,
+    pub retention_newest: &'static str,
+    pub retention_days: &'static str,
+    pub retention_weeks: &'static str,
+    pub retention_months: &'static str,
+    pub clean_up_now: &'static str,
+    pub open: &'static str,
+    pub open_copy_hint: &'static str,
+    pub copy_all_to: &'static str,
+    pub copies_are_decrypted: &'static str,
+    pub working_verify: &'static str,
+    pub working_delete: &'static str,
+    pub working_transfer: &'static str,
+    pub working_extract: &'static str,
+    pub done_verify_ok: &'static str,
+    pub done_verify_problems: &'static str,
+    pub done_verify_cancelled: &'static str,
+    pub damaged_label: &'static str,
+    pub missing_label: &'static str,
+    pub done_delete: &'static str,
+    pub done_transfer: &'static str,
+    pub done_extract: &'static str,
+    pub done_extract_notes: &'static str,
+    pub confirm_delete_title: &'static str,
+    pub confirm_delete_plain: &'static str,
+    pub confirm_delete_encrypted: &'static str,
+    pub confirm_transfer_title: &'static str,
+    pub confirm_extract_title: &'static str,
+
+    // --- 0.3: choosing what is encrypted, and how ---------------------------------
+    pub encrypt_item: &'static str,
+    pub scope_encrypt_everything: &'static str,
+    pub scope_encrypt_selected: &'static str,
+    pub scope_selected_hint: &'static str,
+    pub scope_nothing_marked: &'static str,
+    pub encrypt_app_settings: &'static str,
+    pub how_encrypted: &'static str,
+    pub enc_status_selected: &'static str,
+    pub test_recovery: &'static str,
+    pub replace_recovery: &'static str,
+    pub replace_recovery_hint: &'static str,
+    pub open_by_double_click: &'static str,
+    pub open_by_double_click_hint: &'static str,
+    pub enc_info_title: &'static str,
+    pub enc_info_cipher: &'static str,
+    pub enc_info_passphrase: &'static str,
+    pub enc_info_hidden: &'static str,
+    pub enc_info_hidden_value: &'static str,
+    pub enc_info_key: &'static str,
+    pub enc_info_key_remembered: &'static str,
+    pub enc_info_key_not_remembered: &'static str,
+    pub enc_info_location: &'static str,
+    pub enc_without_app_title: &'static str,
+    pub enc_without_app_text: &'static str,
+    pub enc_without_app_script: &'static str,
 }
 
 pub static EN: Tr = Tr {
@@ -1299,6 +1635,90 @@ pub static EN: Tr = Tr {
     close_hint_title: "AeternaVault keeps running",
     close_hint_text: "Automatic backups continue in the background. To quit, right-click this icon.",
     legacy_task_removed: "Automatic backups are now run by AeternaVault itself. The Windows task of the previous version was removed, and AeternaVault now starts quietly with Windows.",
+
+    enc_method_title: "Encryption method",
+    recommended_suffix: " (recommended)",
+    kdf_title: "Protection of the passphrase against guessing",
+    kdf_standard: "Standard — 64 MiB, unlocks in about half a second",
+    kdf_strong: "Strong — 256 MiB, about two seconds",
+    kdf_very_strong: "Very strong — 1 GiB, several seconds; needs a recent computer",
+    test_recovery_title: "Test the recovery key",
+    test_recovery_hint: "Type the recovery key from your printout or file. Nothing is changed; this only checks that the key still works.",
+    test_recovery_ok: "The recovery key works. Keep it in its safe place.",
+    test_recovery_is_passphrase: "That is the passphrase, not the recovery key. It works as well, but please check the recovery key itself.",
+    test_recovery_wrong: "This recovery key does not unlock these backups. If it was replaced, use the newer key.",
+    test_now: "Test",
+
+    nav_backups: "Backups",
+    backups_title: "Backups at the destination",
+    backups_select_hint: "Tick one backup to browse, check, copy or move it; tick several to delete them.",
+    some_backups_locked: "Some backups are encrypted. Unlock them to see and manage all details.",
+    partly_locked: "details locked",
+    partly_encrypted_label: "partly encrypted",
+    browse: "Browse…",
+    check_backup: "Check",
+    copy_files_to: "Copy files to…",
+    move_to: "Move to…",
+    move_backup: "Move",
+    open_folder: "Open folder",
+    delete_backup: "Delete…",
+    retention_title: "Keeping old backups",
+    retention_auto: "Remove old backups automatically",
+    retention_hint: "After each backup. Only backups of this computer are considered, and the newest backup always stays.",
+    retention_keep: "Keep",
+    retention_newest: "newest,",
+    retention_days: "days,",
+    retention_weeks: "weeks,",
+    retention_months: "months",
+    clean_up_now: "Remove now…",
+    open: "Open",
+    open_copy_hint: "Opens a copy from a temporary folder; the backup stays unchanged. The copy is removed the next time AeternaVault starts.",
+    copy_all_to: "Copy all to…",
+    copies_are_decrypted: "The copies are stored decrypted in the chosen folder.",
+    working_verify: "Checking the backup",
+    working_delete: "Deleting",
+    working_transfer: "Moving the backup",
+    working_extract: "Copying files",
+    done_verify_ok: "The backup is intact.",
+    done_verify_problems: "The check found problems.",
+    done_verify_cancelled: "The check was cancelled.",
+    damaged_label: "damaged",
+    missing_label: "missing",
+    done_delete: "The backups were deleted.",
+    done_transfer: "The backup was moved.",
+    done_extract: "The files were copied.",
+    done_extract_notes: "The files were copied, with a few notes.",
+    confirm_delete_title: "Delete backups?",
+    confirm_delete_plain: "Backup folders go to the recycle bin where the drive has one; otherwise they are deleted permanently. Newer backups that still need files from them get their own copies first.",
+    confirm_delete_encrypted: "Encrypted data that no other backup uses is deleted permanently.",
+    confirm_transfer_title: "Move the backup?",
+    confirm_extract_title: "Copy files?",
+
+    encrypt_item: "Encrypt",
+    scope_encrypt_everything: "Encrypt everything",
+    scope_encrypt_selected: "Encrypt only marked folders and files",
+    scope_selected_hint: "Click the lock next to a folder or file (open a folder with the arrow to see its contents). The rest stays a normal, browsable backup.",
+    scope_nothing_marked: "Nothing is marked yet, so nothing is encrypted.",
+    encrypt_app_settings: "Also encrypt application settings (recommended: they can contain sign-ins)",
+    how_encrypted: "How is it encrypted?",
+    enc_status_selected: "Marked folders and files are encrypted; everything else is backed up normally.",
+    test_recovery: "Test recovery key…",
+    replace_recovery: "New recovery key…",
+    replace_recovery_hint: "Creates a new recovery key. The old one stops working, the passphrase stays.",
+    open_by_double_click: "Open encrypted backups by double-click",
+    open_by_double_click_hint: "Double-clicking “Open with AeternaVault.avault” in a backup folder asks for the passphrase and shows the files.",
+    enc_info_title: "How the backups are encrypted",
+    enc_info_cipher: "Encryption",
+    enc_info_passphrase: "Passphrase",
+    enc_info_hidden: "Hidden",
+    enc_info_hidden_value: "file names, folders, contents and sizes of single files",
+    enc_info_key: "Key on this computer",
+    enc_info_key_remembered: "remembered, protected by your Windows account (DPAPI)",
+    enc_info_key_not_remembered: "not stored; only in memory while unlocked",
+    enc_info_location: "Stored in",
+    enc_without_app_title: "Getting at the files without AeternaVault",
+    enc_without_app_text: "Nothing depends on this installation: copy the whole folder anywhere, and a downloaded AeternaVault.exe (no installation needed) opens it with the passphrase or the recovery key — by double-click on “Open with AeternaVault.avault”, or on the command line:",
+    enc_without_app_script: "The format is openly documented, and a short independent Python script can decrypt it as well, without AeternaVault.",
 };
 
 pub static DE: Tr = Tr {
@@ -1593,6 +2013,90 @@ pub static DE: Tr = Tr {
     close_hint_title: "AeternaVault läuft weiter",
     close_hint_text: "Automatische Sicherungen laufen im Hintergrund weiter. Zum Beenden mit der rechten Maustaste auf dieses Symbol klicken.",
     legacy_task_removed: "Automatische Sicherungen führt AeternaVault jetzt selbst aus. Die Windows-Aufgabe der vorigen Version wurde entfernt, und AeternaVault startet nun leise mit Windows.",
+
+    enc_method_title: "Verschlüsselungsverfahren",
+    recommended_suffix: " (empfohlen)",
+    kdf_title: "Schutz der Passphrase gegen Erraten",
+    kdf_standard: "Standard – 64 MiB, entsperrt in etwa einer halben Sekunde",
+    kdf_strong: "Stark – 256 MiB, etwa zwei Sekunden",
+    kdf_very_strong: "Sehr stark – 1 GiB, mehrere Sekunden; braucht einen neueren Computer",
+    test_recovery_title: "Wiederherstellungsschlüssel testen",
+    test_recovery_hint: "Tippe den Wiederherstellungsschlüssel von deinem Ausdruck oder aus der Datei ab. Es wird nichts verändert; hier wird nur geprüft, ob der Schlüssel noch funktioniert.",
+    test_recovery_ok: "Der Wiederherstellungsschlüssel funktioniert. Bewahre ihn weiter sicher auf.",
+    test_recovery_is_passphrase: "Das ist die Passphrase, nicht der Wiederherstellungsschlüssel. Sie funktioniert auch, aber bitte prüfe den Wiederherstellungsschlüssel selbst.",
+    test_recovery_wrong: "Dieser Wiederherstellungsschlüssel entsperrt diese Sicherungen nicht. Falls er ersetzt wurde, nimm den neueren Schlüssel.",
+    test_now: "Testen",
+
+    nav_backups: "Sicherungen",
+    backups_title: "Sicherungen am Ziel",
+    backups_select_hint: "Eine Sicherung ankreuzen, um sie zu durchsuchen, zu prüfen, zu kopieren oder zu verschieben; mehrere ankreuzen, um sie zu löschen.",
+    some_backups_locked: "Einige Sicherungen sind verschlüsselt. Entsperre sie, um alle Details zu sehen und sie zu verwalten.",
+    partly_locked: "Details gesperrt",
+    partly_encrypted_label: "teilweise verschlüsselt",
+    browse: "Durchsuchen…",
+    check_backup: "Prüfen",
+    copy_files_to: "Dateien kopieren nach…",
+    move_to: "Verschieben nach…",
+    move_backup: "Verschieben",
+    open_folder: "Ordner öffnen",
+    delete_backup: "Löschen…",
+    retention_title: "Alte Sicherungen aufbewahren",
+    retention_auto: "Alte Sicherungen automatisch entfernen",
+    retention_hint: "Nach jeder Sicherung. Berücksichtigt werden nur Sicherungen dieses Computers, und die neueste bleibt immer erhalten.",
+    retention_keep: "Behalten:",
+    retention_newest: "neueste,",
+    retention_days: "Tage,",
+    retention_weeks: "Wochen,",
+    retention_months: "Monate",
+    clean_up_now: "Jetzt entfernen…",
+    open: "Öffnen",
+    open_copy_hint: "Öffnet eine Kopie aus einem temporären Ordner; die Sicherung bleibt unverändert. Die Kopie wird beim nächsten Start von AeternaVault entfernt.",
+    copy_all_to: "Alles kopieren nach…",
+    copies_are_decrypted: "Die Kopien liegen entschlüsselt im gewählten Ordner.",
+    working_verify: "Sicherung wird geprüft",
+    working_delete: "Wird gelöscht",
+    working_transfer: "Sicherung wird verschoben",
+    working_extract: "Dateien werden kopiert",
+    done_verify_ok: "Die Sicherung ist unversehrt.",
+    done_verify_problems: "Die Prüfung hat Probleme gefunden.",
+    done_verify_cancelled: "Die Prüfung wurde abgebrochen.",
+    damaged_label: "beschädigt",
+    missing_label: "fehlt",
+    done_delete: "Die Sicherungen wurden gelöscht.",
+    done_transfer: "Die Sicherung wurde verschoben.",
+    done_extract: "Die Dateien wurden kopiert.",
+    done_extract_notes: "Die Dateien wurden kopiert, mit einigen Hinweisen.",
+    confirm_delete_title: "Sicherungen löschen?",
+    confirm_delete_plain: "Sicherungsordner kommen in den Papierkorb, wenn das Laufwerk einen hat; sonst werden sie endgültig gelöscht. Neuere Sicherungen, die noch Dateien daraus brauchen, bekommen vorher eigene Kopien.",
+    confirm_delete_encrypted: "Verschlüsselte Daten, die keine andere Sicherung mehr nutzt, werden endgültig gelöscht.",
+    confirm_transfer_title: "Sicherung verschieben?",
+    confirm_extract_title: "Dateien kopieren?",
+
+    encrypt_item: "Verschlüsseln",
+    scope_encrypt_everything: "Alles verschlüsseln",
+    scope_encrypt_selected: "Nur markierte Ordner und Dateien verschlüsseln",
+    scope_selected_hint: "Klicke auf das Schloss neben einem Ordner oder einer Datei (mit dem Pfeil siehst du den Inhalt eines Ordners). Der Rest bleibt eine normale, durchsuchbare Sicherung.",
+    scope_nothing_marked: "Noch nichts markiert, daher wird nichts verschlüsselt.",
+    encrypt_app_settings: "Auch Anwendungseinstellungen verschlüsseln (empfohlen: sie können Anmeldungen enthalten)",
+    how_encrypted: "Wie wird verschlüsselt?",
+    enc_status_selected: "Markierte Ordner und Dateien werden verschlüsselt; alles andere wird normal gesichert.",
+    test_recovery: "Wiederherstellungsschlüssel testen…",
+    replace_recovery: "Neuer Wiederherstellungsschlüssel…",
+    replace_recovery_hint: "Erstellt einen neuen Wiederherstellungsschlüssel. Der alte funktioniert dann nicht mehr, die Passphrase bleibt.",
+    open_by_double_click: "Verschlüsselte Sicherungen per Doppelklick öffnen",
+    open_by_double_click_hint: "Ein Doppelklick auf „Open with AeternaVault.avault“ in einem Sicherungsordner fragt nach der Passphrase und zeigt die Dateien.",
+    enc_info_title: "So werden die Sicherungen verschlüsselt",
+    enc_info_cipher: "Verschlüsselung",
+    enc_info_passphrase: "Passphrase",
+    enc_info_hidden: "Verborgen",
+    enc_info_hidden_value: "Dateinamen, Ordner, Inhalte und Größen einzelner Dateien",
+    enc_info_key: "Schlüssel auf diesem Computer",
+    enc_info_key_remembered: "gemerkt, geschützt durch dein Windows-Konto (DPAPI)",
+    enc_info_key_not_remembered: "nicht gespeichert; nur im Arbeitsspeicher, solange entsperrt",
+    enc_info_location: "Gespeichert in",
+    enc_without_app_title: "An die Dateien kommen ohne AeternaVault",
+    enc_without_app_text: "Nichts hängt von dieser Installation ab: Kopiere den ganzen Ordner irgendwohin, und eine heruntergeladene AeternaVault.exe (ohne Installation) öffnet ihn mit der Passphrase oder dem Wiederherstellungsschlüssel – per Doppelklick auf „Open with AeternaVault.avault“ oder auf der Kommandozeile:",
+    enc_without_app_script: "Das Format ist offen dokumentiert, und ein kurzes, unabhängiges Python-Skript kann es ebenfalls entschlüsseln – ganz ohne AeternaVault.",
 };
 
 #[cfg(test)]

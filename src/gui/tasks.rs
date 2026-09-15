@@ -10,8 +10,11 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use eframe::egui;
 
 use crate::engine::backup::BackupReport;
+use crate::engine::manage::{DeleteReport, ExtractReport, TransferReport};
 use crate::engine::plan::{BackupPlan, RestorePlan};
 use crate::engine::restore::RestoreReport;
+use crate::engine::snapshots::{SnapshotInfo, StoredFile};
+use crate::engine::verify::VerifyReport;
 use crate::engine::{CancelToken, Progress};
 use crate::error::EngineResult;
 
@@ -26,13 +29,28 @@ pub enum TaskKind {
     },
     Backup,
     Restore,
+    Verify,
+    Delete,
+    Transfer,
+    /// Copy files out of a backup; `open`: open the single file afterwards.
+    Extract {
+        open: bool,
+    },
+    LoadContents,
 }
 
+// The plans are large, but only one task output exists at a time.
+#[allow(clippy::large_enum_variant)]
 pub enum TaskOutput {
     BackupPlan(EngineResult<BackupPlan>),
     RestorePlan(EngineResult<RestorePlan>),
     Backup(EngineResult<BackupReport>),
     Restore(EngineResult<RestoreReport>),
+    Verify(EngineResult<VerifyReport>),
+    Delete(EngineResult<DeleteReport>),
+    Transfer(EngineResult<TransferReport>),
+    Extract(EngineResult<ExtractReport>),
+    Contents(EngineResult<(SnapshotInfo, Vec<StoredFile>)>),
 }
 
 enum Message {

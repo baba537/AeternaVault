@@ -82,6 +82,8 @@ impl From<SkipReason> for Note {
 pub struct BlobRef {
     pub blob: String,
     pub sha256: String,
+    /// The content lives in the encrypted vault (a blob id), not in a plain folder.
+    pub encrypted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -97,6 +99,8 @@ pub struct PlanItem {
     pub note: Option<Note>,
     pub blob: Option<BlobRef>,
     pub registry: bool,
+    /// Backup: stored in the encrypted part. Restore: comes from it.
+    pub encrypted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +168,7 @@ pub struct PlannedRegistry {
     pub app: String,
     pub app_name: String,
     pub key: String,
+    pub encrypted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -171,10 +176,17 @@ pub struct BackupPlan {
     pub mode: BackupMode,
     pub destination: PathBuf,
     pub computer: String,
-    pub encrypted: bool,
+    /// The backup gets a plain part (a folder) …
+    pub plain_part: bool,
+    /// … and/or an encrypted part (in the vault). Both: partly encrypted.
+    pub encrypted_part: bool,
+    /// Previous plain backup that unchanged plain files are compared against.
     pub base: Option<SnapshotInfo>,
+    /// Previous encrypted backup (or encrypted part).
+    pub encrypted_base: Option<SnapshotInfo>,
     pub hardlink_unchanged: bool,
     pub save_program_list: bool,
+    pub program_list_encrypted: bool,
     pub sources: Vec<PlannedSource>,
     pub registry: Vec<PlannedRegistry>,
     pub items: Vec<PlanItem>,
@@ -263,8 +275,8 @@ pub fn plan_backup(
         }
     }
 
-    let encrypted = config.encryption.enabled;
-    if encrypted {
+    let may_encrypt = input.sources.may_encrypt();
+    if may_encrypt {
         if !vault::exists(&destination) {
             return Err(EngineError::EncryptionNotSetUp);
         }
@@ -275,28 +287,36 @@ pub fn plan_backup(
 
     let mut warnings = Vec::new();
 
-    // The previous backup to compare against.
-    let base = snapshots::latest_usable(&destination, input.computer, encrypted, input.key);
-    let base_index = match &base {
-        Some(info) => match info.load_index(input.key) {
-            Ok(index) => Some(index),
+    // The previous backups to compare against: one per part.
+    let mut load_base = |encrypted: bool| -> Option<(SnapshotInfo, manifest::FileIndex)> {
+        if encrypted && input.key.is_none() {
+            return None;
+        }
+        let info = snapshots::latest_usable(&destination, input.computer, encrypted, input.key)?;
+        match info.load_index(input.key) {
+            Ok(index) => Some((info, index)),
             Err(err) => {
                 warnings.push(format!(
                     "previous backup could not be read, all files count as new: {err}"
                 ));
                 None
             }
-        },
-        None => None,
+        }
     };
-    let base = if base_index.is_some() { base } else { None };
+    let plain_base = load_base(false);
+    let encrypted_base = if may_encrypt { load_base(true) } else { None };
 
-    // Lookup: lowercase source path -> lowercase relative path -> entry.
-    let mut base_lookup: HashMap<String, HashMap<String, &FileEntry>> = HashMap::new();
+    // Lookup per part: lowercase source path -> lowercase relative path -> entry.
+    type Lookup<'a> = HashMap<String, HashMap<String, &'a FileEntry>>;
+    let mut lookups: [Lookup<'_>; 2] = [HashMap::new(), HashMap::new()];
     let mut base_registry: HashMap<String, &RegistryExport> = HashMap::new();
-    if let (Some(info), Some(index)) = (&base, &base_index)
-        && let Some(header) = &info.header
-    {
+    for (part, base) in [(0usize, &plain_base), (1, &encrypted_base)] {
+        let Some((info, index)) = base else {
+            continue;
+        };
+        let Some(header) = &info.header else {
+            continue;
+        };
         let key_to_path: HashMap<&str, String> = header
             .sources
             .iter()
@@ -304,7 +324,7 @@ pub fn plan_backup(
             .collect();
         for entry in &index.files {
             if let Some(path) = key_to_path.get(entry.source.as_str()) {
-                base_lookup
+                lookups[part]
                     .entry(path.clone())
                     .or_default()
                     .insert(entry.path.to_lowercase(), entry);
@@ -319,10 +339,13 @@ pub fn plan_backup(
         mode: config.mode,
         destination: destination.clone(),
         computer: input.computer.to_string(),
-        encrypted,
-        base: base.clone(),
+        plain_part: false,
+        encrypted_part: false,
+        base: plain_base.as_ref().map(|(info, _)| info.clone()),
+        encrypted_base: encrypted_base.as_ref().map(|(info, _)| info.clone()),
         hardlink_unchanged: config.advanced.hardlink_unchanged,
         save_program_list: config.advanced.save_program_list,
+        program_list_encrypted: input.sources.program_list_encrypted,
         sources: Vec::new(),
         registry: Vec::new(),
         items: Vec::new(),
@@ -359,26 +382,37 @@ pub fn plan_backup(
             scan::scan_source(&source.root, &options, cancel, &mut progress, &mut reporter)?;
         plan.excluded += scanned.excluded;
 
-        let previous = base_lookup.get(&path_key(&source.root));
+        let source_path = path_key(&source.root);
+        let previous = [lookups[0].get(&source_path), lookups[1].get(&source_path)];
         let mut seen = HashSet::new();
 
         for file in scanned.files {
             let lower = file.rel.to_lowercase();
-            let previous_entry = previous.and_then(|m| m.get(&lower));
-            let kind = match previous_entry {
+            let encrypted = source.encrypt.applies(&file.rel);
+            let part = usize::from(encrypted);
+            let same_part = previous[part].and_then(|m| m.get(&lower));
+            let any_part = same_part.or_else(|| previous[1 - part].and_then(|m| m.get(&lower)));
+            let kind = match any_part {
                 None => ItemKind::New,
                 Some(e) if e.size == file.size && e.modified == file.modified => {
                     ItemKind::Unchanged
                 }
                 Some(_) => ItemKind::Changed,
             };
-            let blob = previous_entry
+            // Content can only be reused from the part it is stored in now.
+            let blob = same_part
                 .filter(|_| kind == ItemKind::Unchanged)
                 .map(|e| BlobRef {
                     blob: e.blob.clone(),
                     sha256: e.sha256.clone(),
+                    encrypted,
                 });
             seen.insert(lower);
+            if encrypted {
+                plan.encrypted_part = true;
+            } else {
+                plan.plain_part = true;
+            }
             push(
                 &mut plan.items,
                 &mut plan.summary,
@@ -391,6 +425,7 @@ pub fn plan_backup(
                     note: None,
                     blob,
                     registry: false,
+                    encrypted,
                 },
             );
         }
@@ -417,33 +452,36 @@ pub fn plan_backup(
                     note: Some(skipped.reason.into()),
                     blob: None,
                     registry: false,
+                    encrypted: false,
                 },
             );
         }
 
-        if let Some(previous) = previous {
-            let mut removed: Vec<_> = previous
-                .iter()
-                .filter(|(lower, _)| !seen.contains(*lower))
-                .map(|(_, e)| *e)
-                .collect();
-            removed.sort_by(|a, b| a.path.cmp(&b.path));
-            for entry in removed {
-                push(
-                    &mut plan.items,
-                    &mut plan.summary,
-                    PlanItem {
-                        kind: ItemKind::Removed,
-                        source: source_index,
-                        rel: entry.path.clone(),
-                        size: entry.size,
-                        modified: entry.modified,
-                        note: None,
-                        blob: None,
-                        registry: false,
-                    },
-                );
+        let mut removed: Vec<&FileEntry> = Vec::new();
+        for map in previous.into_iter().flatten() {
+            for (lower, entry) in map {
+                if seen.insert(lower.clone()) {
+                    removed.push(entry);
+                }
             }
+        }
+        removed.sort_by(|a, b| a.path.cmp(&b.path));
+        for entry in removed {
+            push(
+                &mut plan.items,
+                &mut plan.summary,
+                PlanItem {
+                    kind: ItemKind::Removed,
+                    source: source_index,
+                    rel: entry.path.clone(),
+                    size: entry.size,
+                    modified: entry.modified,
+                    note: None,
+                    blob: None,
+                    registry: false,
+                    encrypted: false,
+                },
+            );
         }
     }
 
@@ -477,10 +515,16 @@ pub fn plan_backup(
             Some(previous) if previous.fingerprint() == export.fingerprint() => ItemKind::Unchanged,
             Some(_) => ItemKind::Changed,
         };
+        if reg.encrypted {
+            plan.encrypted_part = true;
+        } else {
+            plan.plain_part = true;
+        }
         plan.registry.push(PlannedRegistry {
             app: reg.app.clone(),
             app_name: reg.app_name.clone(),
             key: export.root.clone(),
+            encrypted: reg.encrypted,
         });
         push(
             &mut plan.items,
@@ -494,8 +538,25 @@ pub fn plan_backup(
                 note: None,
                 blob: None,
                 registry: true,
+                encrypted: reg.encrypted,
             },
         );
+    }
+
+    if plan.save_program_list {
+        if plan.program_list_encrypted {
+            plan.encrypted_part = true;
+        } else {
+            plan.plain_part = true;
+        }
+    }
+    // A backup without any content still gets a (plain) folder.
+    if !plan.plain_part && !plan.encrypted_part {
+        if input.sources.may_encrypt() && config.encryption.everything() {
+            plan.encrypted_part = true;
+        } else {
+            plan.plain_part = true;
+        }
     }
 
     progress.phase = Phase::Finishing;
@@ -592,7 +653,18 @@ pub fn plan_restore(
         None if snapshot.is_locked() => return Err(EngineError::Locked),
         None => return Err(EngineError::SnapshotNotFound(snapshot.qualified_id())),
     };
-    let index = snapshot.load_index(key)?;
+    if snapshot.needs_unlock() {
+        return Err(EngineError::Locked);
+    }
+    // Every part with its index: the plain part first, then the encrypted one.
+    let mut parts: Vec<(&SnapshotInfo, manifest::FileIndex)> = Vec::new();
+    for part in snapshot.parts() {
+        parts.push((part, part.load_index(key)?));
+    }
+    let mut registry_records = header.registry.clone();
+    if let Some(companion) = snapshot.companion.as_ref().and_then(|c| c.header.as_ref()) {
+        registry_records.extend(companion.registry.iter().cloned());
+    }
     let here = KnownPaths::current();
     let destination = snapshot.destination();
 
@@ -631,7 +703,7 @@ pub fn plan_restore(
         snapshot: snapshot.clone(),
         options,
         sources: sources.clone(),
-        items: Vec::with_capacity(index.files.len()),
+        items: Vec::with_capacity(parts.iter().map(|(_, i)| i.files.len()).sum()),
         summary: Summary::default(),
         registry: Vec::new(),
         running_apps,
@@ -639,12 +711,15 @@ pub fn plan_restore(
 
     let mut progress = Progress {
         phase: Phase::Scanning,
-        files_total: index.files.len() as u64,
+        files_total: parts.iter().map(|(_, i)| i.files.len() as u64).sum(),
         ..Progress::default()
     };
     let mut reporter = Reporter::new(on_progress);
 
-    for entry in &index.files {
+    let entries = parts
+        .iter()
+        .flat_map(|(part, index)| index.files.iter().map(move |entry| (*part, entry)));
+    for (part, entry) in entries {
         if cancel.is_cancelled() {
             return Err(EngineError::Cancelled);
         }
@@ -669,8 +744,10 @@ pub fn plan_restore(
             blob: Some(BlobRef {
                 blob: entry.blob.clone(),
                 sha256: entry.sha256.clone(),
+                encrypted: part.is_encrypted(),
             }),
             registry: false,
+            encrypted: part.is_encrypted(),
         };
 
         let Some(rel) = safe_relative_path(&entry.path) else {
@@ -679,7 +756,7 @@ pub fn plan_restore(
             push(&mut plan.items, &mut plan.summary, item);
             continue;
         };
-        let blob_path = match snapshot.blob_root() {
+        let blob_path = match part.blob_root() {
             Some(root) => safe_relative_path(&entry.blob).map(|b| root.join(b)),
             None => entry
                 .blob
@@ -733,9 +810,11 @@ pub fn plan_restore(
 
     // Registry settings.
     let mut registry_sources: HashMap<String, usize> = HashMap::new();
-    for export in &index.registry {
-        let record = header
-            .registry
+    let exports = parts
+        .iter()
+        .flat_map(|(part, index)| index.registry.iter().map(move |e| (part.is_encrypted(), e)));
+    for (from_encrypted, export) in exports {
+        let record = registry_records
             .iter()
             .find(|r| r.key.eq_ignore_ascii_case(&export.root));
         let (app, app_name) = record
@@ -777,6 +856,7 @@ pub fn plan_restore(
             note: None,
             blob: None,
             registry: true,
+            encrypted: from_encrypted,
         };
         if plan.options.target == RestoreTarget::Original {
             match registry::export(&adapted.root) {

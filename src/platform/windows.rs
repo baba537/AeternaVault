@@ -41,6 +41,31 @@ pub fn attach_parent_console() {
     }
 }
 
+/// Turns off echo for a console input handle; returns the previous mode.
+pub fn hide_console_input(console: &std::fs::File) -> Option<u32> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Console::{ENABLE_ECHO_INPUT, GetConsoleMode, SetConsoleMode};
+    let handle = console.as_raw_handle();
+    let mut mode = 0u32;
+    // SAFETY: the handle belongs to an open console input file.
+    unsafe {
+        if GetConsoleMode(handle, &mut mode) == 0 {
+            return None;
+        }
+        SetConsoleMode(handle, mode & !ENABLE_ECHO_INPUT);
+    }
+    Some(mode)
+}
+
+pub fn set_console_mode(console: &std::fs::File, mode: u32) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Console::SetConsoleMode;
+    // SAFETY: the handle belongs to an open console input file.
+    unsafe {
+        SetConsoleMode(console.as_raw_handle(), mode);
+    }
+}
+
 pub fn first_secondary_fixed_drive() -> Option<PathBuf> {
     let system = std::env::var("SystemDrive")
         .unwrap_or_else(|_| "C:".to_string())
@@ -131,6 +156,46 @@ pub fn thread_background_end() {
     unsafe {
         SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
     }
+}
+
+/// Moves a file or folder to the recycle bin of its drive. Fails if the drive
+/// has no recycle bin (network shares, some removable drives), so nothing is
+/// deleted permanently behind the user's back.
+pub fn recycle(path: &Path) -> io::Result<()> {
+    use windows_sys::Win32::UI::Shell::{
+        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, SHFILEOPSTRUCTW,
+        SHFileOperationW, SHQUERYRBINFO, SHQueryRecycleBinW,
+    };
+    let absolute = std::path::absolute(path)?;
+    let root: PathBuf = absolute.components().take(2).collect();
+    let root_wide = wide(&root);
+    // SAFETY: plain query with a NUL-terminated path and an initialised struct.
+    let has_bin = unsafe {
+        let mut info: SHQUERYRBINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<SHQUERYRBINFO>() as u32;
+        SHQueryRecycleBinW(root_wide.as_ptr(), &mut info) >= 0
+    };
+    if !has_bin {
+        return Err(io::Error::from(io::ErrorKind::Unsupported));
+    }
+    // SHFileOperation expects a list terminated by two NUL characters.
+    let mut from = wide(&absolute);
+    from.push(0);
+    // SAFETY: `from` is double-NUL-terminated and outlives the call; all other
+    // pointers are null as documented for a delete operation.
+    unsafe {
+        let mut operation: SHFILEOPSTRUCTW = std::mem::zeroed();
+        operation.wFunc = FO_DELETE;
+        operation.pFrom = from.as_ptr();
+        operation.fFlags = (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT) as u16;
+        let result = SHFileOperationW(&mut operation);
+        if result != 0 || operation.fAnyOperationsAborted != 0 {
+            return Err(io::Error::other(format!(
+                "moving to the recycle bin failed (code {result})"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// `true` if the computer runs on battery right now.

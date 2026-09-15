@@ -24,9 +24,39 @@ pub struct SnapshotInfo {
     pub location: Location,
     /// `None` if the backup is unfinished, damaged, or encrypted and locked.
     pub header: Option<SnapshotHeader>,
+    /// The encrypted part of a partly encrypted backup (this is the plain part).
+    pub companion: Option<Box<SnapshotInfo>>,
 }
 
 impl SnapshotInfo {
+    /// This backup and, if partly encrypted, its encrypted part.
+    pub fn parts(&self) -> impl Iterator<Item = &SnapshotInfo> {
+        std::iter::once(self).chain(self.companion.as_deref())
+    }
+
+    /// Whether the key is needed to see or restore everything.
+    pub fn needs_key(&self) -> bool {
+        self.parts().any(|p| p.is_encrypted())
+    }
+
+    /// Whether some part is encrypted and not unlocked.
+    pub fn needs_unlock(&self) -> bool {
+        self.parts().any(SnapshotInfo::is_locked)
+    }
+
+    pub fn is_split(&self) -> bool {
+        self.companion.is_some()
+    }
+
+    /// Statistics of all parts together, if known.
+    pub fn total_stats(&self) -> Option<super::manifest::SnapshotStats> {
+        let mut total = self.header.as_ref()?.stats.clone();
+        if let Some(companion) = &self.companion {
+            let stats = &companion.header.as_ref()?.stats;
+            total.add(stats);
+        }
+        Some(total)
+    }
     /// Unique within a destination.
     pub fn qualified_id(&self) -> String {
         match &self.location {
@@ -91,6 +121,48 @@ impl SnapshotInfo {
             .collect();
         format!("{digits:0<14}")
     }
+}
+
+/// One stored file of a backup, for browsing.
+#[derive(Debug, Clone)]
+pub struct StoredFile {
+    /// Folder inside the backup (e.g. `Documents`, `Applications/Firefox`).
+    pub source: String,
+    /// Path inside that folder, `/`-separated.
+    pub path: String,
+    pub size: u64,
+    pub modified: i64,
+    pub sha256: String,
+    pub blob: String,
+    pub encrypted: bool,
+}
+
+impl StoredFile {
+    pub fn display_path(&self) -> String {
+        format!("{}/{}", self.source, self.path)
+    }
+}
+
+/// All files of a backup (every part), sorted by path.
+pub fn contents(snapshot: &SnapshotInfo, key: Option<&VaultKey>) -> EngineResult<Vec<StoredFile>> {
+    if snapshot.needs_unlock() {
+        return Err(EngineError::Locked);
+    }
+    let mut files = Vec::new();
+    for part in snapshot.parts() {
+        let index = part.load_index(key)?;
+        files.extend(index.files.into_iter().map(|f| StoredFile {
+            source: f.source,
+            path: f.path,
+            size: f.size,
+            modified: f.modified,
+            sha256: f.sha256,
+            blob: f.blob,
+            encrypted: part.is_encrypted(),
+        }));
+    }
+    files.sort_by_key(|f| f.display_path().to_lowercase());
+    Ok(files)
 }
 
 /// `true` if the destination drive/share is reachable. The destination folder
@@ -198,6 +270,7 @@ pub fn list(destination: &Path, key: Option<&VaultKey>) -> EngineResult<Vec<Snap
                     destination: destination.to_path_buf(),
                 },
                 header,
+                companion: None,
             });
         } else {
             list_legacy(&dir, &name, &mut snapshots);
@@ -209,7 +282,36 @@ pub fn list(destination: &Path, key: Option<&VaultKey>) -> EngineResult<Vec<Snap
             .cmp(&a.sort_key())
             .then_with(|| a.computer.cmp(&b.computer))
     });
-    Ok(snapshots)
+    Ok(pair_parts(snapshots))
+}
+
+/// Attaches the encrypted part of a partly encrypted backup to its plain part.
+fn pair_parts(snapshots: Vec<SnapshotInfo>) -> Vec<SnapshotInfo> {
+    let mut encrypted: Vec<SnapshotInfo> = Vec::new();
+    let mut others: Vec<SnapshotInfo> = Vec::new();
+    for info in snapshots {
+        if info.is_encrypted() {
+            encrypted.push(info);
+        } else {
+            others.push(info);
+        }
+    }
+    for info in &mut others {
+        let split = info.header.as_ref().is_some_and(|h| h.split);
+        if split
+            && matches!(info.location, Location::Plain { .. })
+            && let Some(position) = encrypted.iter().position(|e| e.id == info.id)
+        {
+            info.companion = Some(Box::new(encrypted.remove(position)));
+        }
+    }
+    others.extend(encrypted);
+    others.sort_by(|a, b| {
+        b.sort_key()
+            .cmp(&a.sort_key())
+            .then_with(|| a.computer.cmp(&b.computer))
+    });
+    others
 }
 
 fn list_encrypted(destination: &Path, key: Option<&VaultKey>, out: &mut Vec<SnapshotInfo>) {
@@ -243,6 +345,7 @@ fn list_encrypted(destination: &Path, key: Option<&VaultKey>, out: &mut Vec<Snap
                 destination: destination.to_path_buf(),
             },
             header,
+            companion: None,
         });
     }
 }
@@ -274,6 +377,7 @@ fn list_legacy(computer_dir: &Path, computer: &str, out: &mut Vec<SnapshotInfo>)
                 computer_dir: computer_dir.to_path_buf(),
             },
             header,
+            companion: None,
         });
     }
 }
@@ -286,11 +390,18 @@ pub fn latest_usable(
     encrypted: bool,
     key: Option<&VaultKey>,
 ) -> Option<SnapshotInfo> {
-    list(destination, key).ok()?.into_iter().find(|s| {
-        s.computer.eq_ignore_ascii_case(computer)
-            && s.is_usable_base()
-            && s.is_encrypted() == encrypted
-    })
+    list(destination, key)
+        .ok()?
+        .into_iter()
+        .flat_map(|mut s| {
+            let companion = s.companion.take().map(|c| *c);
+            std::iter::once(s).chain(companion)
+        })
+        .find(|s| {
+            s.computer.eq_ignore_ascii_case(computer)
+                && s.is_usable_base()
+                && s.is_encrypted() == encrypted
+        })
 }
 
 /// Whether another computer already writes plain backups into `destination`.
@@ -313,8 +424,13 @@ pub fn find(
 ) -> EngineResult<SnapshotInfo> {
     let all = list(destination, key)?;
     let found = if wanted.eq_ignore_ascii_case("latest") {
-        all.into_iter()
-            .find(|s| s.computer.eq_ignore_ascii_case(computer) && s.is_usable_base())
+        // This computer's newest backup; otherwise the newest one at all
+        // (e.g. restoring on a new computer).
+        let own = all
+            .iter()
+            .position(|s| s.computer.eq_ignore_ascii_case(computer) && s.is_usable_base())
+            .or_else(|| all.iter().position(SnapshotInfo::is_usable_base));
+        own.map(|i| all[i].clone())
     } else {
         let mut matches: Vec<_> = all
             .into_iter()

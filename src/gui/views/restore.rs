@@ -118,7 +118,10 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                                         lang.files(h.stats.files),
                                         lang.bytes(h.stats.bytes)
                                     );
-                                    if h.encrypted {
+                                    if info.is_split() {
+                                        detail
+                                            .push_str(&format!(" · {}", t.partly_encrypted_label));
+                                    } else if h.encrypted {
                                         detail.push_str(&format!(" · {}", t.encrypted_label));
                                     }
                                     if !info.computer.eq_ignore_ascii_case(&app.computer) {
@@ -155,7 +158,7 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                                 p.text_secondary,
                                 Align::Min,
                             );
-                            let status_text = if info.is_locked() {
+                            let status_text = if info.needs_unlock() {
                                 t.selected_backup_locked
                             } else {
                                 lang.status(status)
@@ -368,7 +371,7 @@ pub fn action_bar(app: &mut AeternaApp, ui: &mut Ui) {
         });
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let locked = selected.as_ref().is_some_and(|s| s.is_locked());
+            let locked = selected.as_ref().is_some_and(|s| s.needs_unlock());
             if locked {
                 if widgets::button(ui, ButtonKind::Primary, t.unlock, !app.is_busy()).clicked() {
                     app.open_unlock(AfterUnlock::RefreshSnapshots);

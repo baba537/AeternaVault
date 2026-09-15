@@ -346,7 +346,8 @@ impl AeternaApp {
         if self.is_busy() {
             return;
         }
-        if self.config.encryption.enabled && self.vault.key.is_none() {
+        let sources = self.collect_sources();
+        if sources.may_encrypt() && self.vault.key.is_none() {
             self.refresh_vault();
             if self.vault.header.is_none() {
                 self.notify(
@@ -361,7 +362,6 @@ impl AeternaApp {
             }
         }
         let config = self.config.clone();
-        let sources = self.collect_sources();
         let computer = self.computer.clone();
         let key = self.vault.key.clone();
         let running = self.running_chosen_apps(self.lang);
@@ -389,7 +389,7 @@ impl AeternaApp {
         let Some(snapshot) = self.selected_snapshot().cloned() else {
             return;
         };
-        if snapshot.is_locked() {
+        if snapshot.needs_unlock() {
             self.open_unlock(AfterUnlock::RefreshSnapshots);
             return;
         }
@@ -547,6 +547,9 @@ impl AeternaApp {
                     tracing::error!("backup failed: {e}");
                     self.lang.error_message(&e)
                 });
+                if result.is_ok() {
+                    self.apply_retention_quietly(ctx);
+                }
                 self.screen = Screen::Done(Box::new(Done::Backup(result)));
                 self.refresh_snapshots(ctx);
             }
@@ -561,6 +564,7 @@ impl AeternaApp {
                 self.refresh_sizes(ctx);
                 self.refresh_app_status(ctx);
             }
+            other => self.finish_manage_task(ctx, kind, other),
         }
     }
 
@@ -642,6 +646,7 @@ impl AeternaApp {
                     passphrase: String::new(),
                     repeat: String::new(),
                     remember: true,
+                    options: vault::VaultOptions::default(),
                     error: None,
                 });
             }
@@ -662,12 +667,17 @@ impl AeternaApp {
     }
 
     /// Creates the vault; returns the recovery key to show.
-    pub fn create_vault(&mut self, passphrase: &str, remember: bool) -> Result<String, String> {
+    pub fn create_vault(
+        &mut self,
+        passphrase: &str,
+        remember: bool,
+        options: vault::VaultOptions,
+    ) -> Result<String, String> {
         let destination = self.config.destination.clone();
         if destination.as_os_str().is_empty() {
             return Err(self.lang.error_message(&EngineError::NoDestination));
         }
-        let created = vault::create(&destination, passphrase)
+        let created = vault::create(&destination, passphrase, options)
             .map_err(|e| self.lang.error_message(&e.into()))?;
         if remember
             && let Err(err) = vault::remember_key(&self.key_dir(), &created.header, &created.key)
@@ -718,6 +728,7 @@ impl AeternaApp {
                     error: None,
                 });
             }
+            AfterUnlock::ReplaceRecovery => self.replace_recovery_key(),
             AfterUnlock::RefreshSnapshots | AfterUnlock::Remember => {}
         }
         Ok(())
@@ -732,6 +743,41 @@ impl AeternaApp {
         self.refresh_vault();
         tracing::info!("vault passphrase changed");
         Ok(())
+    }
+
+    /// Checks a recovery key without changing anything.
+    pub fn test_recovery_key(&self, secret: &str) -> Result<(), String> {
+        let t = self.lang.t();
+        match vault::check_secret(&self.config.destination, secret) {
+            Ok(crate::engine::crypto::SlotKind::RecoveryKey) => Ok(()),
+            Ok(crate::engine::crypto::SlotKind::Passphrase) => {
+                Err(t.test_recovery_is_passphrase.to_string())
+            }
+            Err(crate::engine::crypto::CryptoError::WrongKey) => {
+                Err(t.test_recovery_wrong.to_string())
+            }
+            Err(err) => Err(self.lang.error_message(&err.into())),
+        }
+    }
+
+    /// Creates a new recovery key (the old one stops working) and shows it.
+    pub fn replace_recovery_key(&mut self) {
+        let Some(key) = self.vault.key.clone() else {
+            self.open_unlock(AfterUnlock::ReplaceRecovery);
+            return;
+        };
+        match vault::replace_recovery_key(&self.config.destination, &key) {
+            Ok(recovery) => {
+                tracing::info!("recovery key replaced");
+                self.refresh_vault();
+                self.vault.dialog = Some(VaultDialog::ShowRecovery {
+                    key: recovery,
+                    confirmed: false,
+                    copied_at: None,
+                });
+            }
+            Err(err) => self.notify(NoticeKind::Error, self.lang.error_message(&err.into())),
+        }
     }
 
     pub fn set_remembered(&mut self, remember: bool) {

@@ -295,6 +295,52 @@ pub fn eye_button(ui: &mut Ui, visible: bool, label: &str) -> Response {
         .on_hover_cursor(CursorIcon::PointingHand)
 }
 
+/// A small padlock centred at `center` (encrypted items).
+pub fn lock_icon(ui: &Ui, center: Pos2, color: Color32) {
+    let painter = ui.painter();
+    let stroke = Stroke::new(1.3, color);
+    let body = Rect::from_center_size(center + egui::vec2(0.0, 2.0), egui::vec2(10.0, 7.5));
+    painter.rect_filled(body, CornerRadius::same(2), color);
+    let top = center + egui::vec2(0.0, -1.5);
+    let arc: Vec<Pos2> = (0..=12)
+        .map(|i| {
+            let a = std::f32::consts::PI + i as f32 * std::f32::consts::PI / 12.0;
+            top + egui::vec2(a.cos() * 3.2, a.sin() * 3.6)
+        })
+        .collect();
+    painter.add(egui::Shape::line(arc, stroke));
+}
+
+/// A clickable padlock for marking items as encrypted. Returns the response.
+pub fn lock_toggle(
+    ui: &mut Ui,
+    state: crate::engine::selection::CheckState,
+    label: &str,
+) -> Response {
+    use crate::engine::selection::CheckState;
+    let p = *palette(ui);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::click());
+    let hovered = response.hovered();
+    if hovered {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(3), p.raised);
+    }
+    let color = match state {
+        CheckState::Checked => p.accent,
+        CheckState::Mixed => p.accent.gamma_multiply(0.55),
+        CheckState::Unchecked if hovered => p.text_secondary,
+        CheckState::Unchecked => p.border,
+    };
+    lock_icon(ui, rect.center(), color);
+    let marked = state == CheckState::Checked;
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, marked, label)
+    });
+    response
+        .on_hover_text(label)
+        .on_hover_cursor(CursorIcon::PointingHand)
+}
+
 pub fn status_dot(ui: &mut Ui, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 16.0), Sense::hover());
     ui.painter().circle_filled(rect.center(), 4.0, color);

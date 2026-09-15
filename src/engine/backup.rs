@@ -1,4 +1,7 @@
 //! Executes a confirmed [`BackupPlan`].
+//!
+//! A backup has a plain part (a folder), an encrypted part (in the vault), or
+//! both. Each plan item says where it goes.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -20,21 +23,41 @@ use super::{
 use crate::config::BackupMode;
 use crate::error::{EngineError, EngineResult, IoContext};
 use crate::platform::known_paths::KnownPaths;
+use crate::platform::registry::RegistryExport;
 use crate::platform::{self, apps, registry, vss::FileReader};
 
 #[derive(Debug, Clone)]
 pub struct BackupReport {
-    /// Folder of the new backup (plain) or the vault folder (encrypted).
+    /// Folder of the new backup (plain part) or the vault folder (encrypted only).
     pub snapshot_dir: PathBuf,
+    /// Header of the plain part, or of the encrypted part if there is no plain one.
     pub header: SnapshotHeader,
+    /// Header of the encrypted part of a partly encrypted backup.
+    pub encrypted_part: Option<SnapshotHeader>,
     pub warnings: Vec<String>,
     pub duration: Duration,
 }
 
-/// Where the data of one backup goes.
-enum Store<'a> {
-    Plain { snapshot_dir: PathBuf },
-    Encrypted { key: &'a VaultKey },
+impl BackupReport {
+    pub fn total_stats(&self) -> SnapshotStats {
+        let mut stats = self.header.stats.clone();
+        if let Some(part) = &self.encrypted_part {
+            stats.add(&part.stats);
+        }
+        stats
+    }
+}
+
+const PLAIN: usize = 0;
+const ENCRYPTED: usize = 1;
+
+/// What is collected for one part while copying.
+#[derive(Default)]
+struct PartData {
+    entries: Vec<FileEntry>,
+    stats: SnapshotStats,
+    registry_records: Vec<RegistryRecord>,
+    registry_exports: Vec<RegistryExport>,
 }
 
 pub fn run_backup(
@@ -61,21 +84,29 @@ pub fn run_backup(
         });
     }
 
-    let id = new_snapshot_id(plan)?;
-    let store = if plan.encrypted {
-        let key = key.ok_or(EngineError::Locked)?;
-        Store::Encrypted { key }
+    let key = if plan.encrypted_part {
+        Some(key.ok_or(EngineError::Locked)?)
     } else {
+        None
+    };
+    let id = new_snapshot_id(plan)?;
+    let plain_dir = if plan.plain_part {
         let snapshot_dir = plan.destination.join(&id);
         let meta = snapshot_dir.join(META_DIR);
         fsops::create_dir_all(&meta).at("could not create", &meta)?;
         platform::set_hidden(&meta);
-        Store::Plain { snapshot_dir }
+        Some(snapshot_dir)
+    } else {
+        None
     };
+    if key.is_some() {
+        vault::ensure_guide_files(&plan.destination);
+    }
 
     tracing::info!(
         snapshot = %id,
-        encrypted = plan.encrypted,
+        plain = plan.plain_part,
+        encrypted = plan.encrypted_part,
         mode = ?plan.mode,
         reader = reader.describe(),
         files = files_total,
@@ -92,12 +123,14 @@ pub fn run_backup(
     };
     reporter.now(&progress);
 
-    let mut entries = Vec::with_capacity(progress.files_total as usize);
-    let mut warnings = plan.warnings.clone();
-    let mut stats = SnapshotStats {
-        skipped: plan.summary.count(ItemKind::Skipped),
-        ..SnapshotStats::default()
+    let mut parts = [PartData::default(), PartData::default()];
+    let primary = if plain_dir.is_some() {
+        PLAIN
+    } else {
+        ENCRYPTED
     };
+    parts[primary].stats.skipped = plan.summary.count(ItemKind::Skipped);
+    let mut warnings = plan.warnings.clone();
     let mut cancelled = false;
 
     for item in plan.stored_files() {
@@ -111,6 +144,8 @@ pub fn run_backup(
         };
         let src = source.root.join(&rel);
         progress.current = src.display().to_string();
+        let part = if item.encrypted { ENCRYPTED } else { PLAIN };
+        let stats = &mut parts[part].stats;
 
         // Re-check the file: it may have changed since the preview.
         let read_path = reader.read_path(&src);
@@ -130,14 +165,14 @@ pub fn run_backup(
             && item.kind == ItemKind::Unchanged
             && unchanged_since_plan;
 
-        let outcome: Result<(String, String), CopyError> = match &store {
-            Store::Plain { snapshot_dir } => {
+        let outcome: Result<(String, String), CopyError> = match (item.encrypted, key, &plain_dir) {
+            (false, _, Some(snapshot_dir)) => {
                 let dst = snapshot_dir.join(key_path(&source.key)).join(&rel);
                 let own_blob = format!("{id}/{}/{}", source.key, item.rel);
                 let base_path = item
                     .blob
                     .as_ref()
-                    .filter(|_| reuse_base)
+                    .filter(|b| reuse_base && !b.encrypted)
                     .and_then(|b| {
                         let root = plan.base.as_ref()?.blob_root()?;
                         Some((root.join(safe_relative_path(&b.blob)?), b))
@@ -172,9 +207,11 @@ pub fn run_backup(
                     }),
                 }
             }
-            Store::Encrypted { key } => {
+            (true, Some(key), _) => {
                 let existing = item.blob.as_ref().filter(|b| {
-                    reuse_base && vault::blob_path(&plan.destination, &b.blob).is_file()
+                    reuse_base
+                        && b.encrypted
+                        && vault::blob_path(&plan.destination, &b.blob).is_file()
                 });
                 match existing {
                     Some(base) => {
@@ -202,11 +239,16 @@ pub fn run_backup(
                     }),
                 }
             }
+            // The plan and the prepared parts disagree; cannot happen for plans
+            // made by `plan_backup`.
+            _ => Err(CopyError::Io(std::io::Error::other(
+                "no storage prepared for this file",
+            ))),
         };
 
         match outcome {
             Ok((blob, sha256)) => {
-                entries.push(FileEntry {
+                parts[part].entries.push(FileEntry {
                     source: source.key.clone(),
                     path: item.rel.clone(),
                     size,
@@ -214,8 +256,8 @@ pub fn run_backup(
                     sha256,
                     blob,
                 });
-                stats.files += 1;
-                stats.bytes += size;
+                parts[part].stats.files += 1;
+                parts[part].stats.bytes += size;
             }
             Err(CopyError::Cancelled) => {
                 cancelled = true;
@@ -224,7 +266,7 @@ pub fn run_backup(
             Err(err) => {
                 tracing::warn!("could not back up {}: {err}", src.display());
                 warnings.push(format!("{}: {err}", src.display()));
-                stats.failed += 1;
+                parts[part].stats.failed += 1;
             }
         }
         progress.files_done += 1;
@@ -250,14 +292,19 @@ pub fn run_backup(
         .collect();
 
     // Registry settings (exported again now, so they match the moment of the backup).
-    let mut registry_exports = Vec::new();
-    let mut registry_records = Vec::new();
     if !cancelled {
         for planned in &plan.registry {
+            let part = if planned.encrypted && key.is_some() {
+                ENCRYPTED
+            } else {
+                PLAIN
+            };
             match registry::export(&planned.key) {
                 Ok(Some(export)) => {
                     let mut reg_file = None;
-                    if let Store::Plain { snapshot_dir } = &store {
+                    if part == PLAIN
+                        && let Some(snapshot_dir) = &plain_dir
+                    {
                         let folder = super::plan::registry_folder_key(&planned.app_name);
                         let file_name = format!(
                             "{}.reg",
@@ -269,7 +316,8 @@ pub fn run_backup(
                             Err(err) => warnings.push(format!("{}: {err}", path.display())),
                         }
                     }
-                    registry_records.push(RegistryRecord {
+                    let data = &mut parts[part];
+                    data.registry_records.push(RegistryRecord {
                         app: planned.app.clone(),
                         app_name: planned.app_name.clone(),
                         key: export.root.clone(),
@@ -277,13 +325,13 @@ pub fn run_backup(
                         values: export.value_count(),
                         fingerprint: export.fingerprint(),
                     });
-                    stats.registry_keys += 1;
-                    registry_exports.push(export);
+                    data.stats.registry_keys += 1;
+                    data.registry_exports.push(export);
                 }
                 Ok(None) => {}
                 Err(err) => {
                     warnings.push(format!("{}: {err}", planned.key));
-                    stats.failed += 1;
+                    parts[part].stats.failed += 1;
                 }
             }
         }
@@ -291,25 +339,33 @@ pub fn run_backup(
 
     // A list of installed programs, to make reinstalling on a new computer easier.
     if plan.save_program_list && !cancelled {
-        add_program_list(
-            &store,
-            plan,
-            &id,
-            &mut source_records,
-            &mut entries,
-            &mut warnings,
-        );
+        let encrypted = (plan.program_list_encrypted || plain_dir.is_none()) && key.is_some();
+        let store = ProgramListStore {
+            plain_dir: plain_dir.as_deref().filter(|_| !encrypted),
+            key: key.filter(|_| encrypted),
+        };
+        let part = if encrypted { ENCRYPTED } else { PLAIN };
+        if let Some(added) =
+            add_program_list(&store, plan, &id, &mut parts[part].entries, &mut warnings)
+        {
+            source_records.push(added);
+        }
     }
 
+    let failed: u64 = parts.iter().map(|p| p.stats.failed).sum();
     let status = if cancelled {
         SnapshotStatus::Cancelled
-    } else if stats.failed > 0 {
+    } else if failed > 0 {
         SnapshotStatus::CompleteWithWarnings
     } else {
         SnapshotStatus::Complete
     };
+    let split = plain_dir.is_some() && key.is_some();
+    let finished_at = Some(Utc::now());
+    let known_paths = KnownPaths::current();
 
-    let header = SnapshotHeader {
+    let [plain_data, encrypted_data] = parts;
+    let make_header = |encrypted: bool, data: &PartData, base: Option<String>| SnapshotHeader {
         format: FORMAT_VERSION,
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         id: id.clone(),
@@ -318,89 +374,113 @@ pub fn run_backup(
         mode: plan.mode,
         status,
         started_at,
-        finished_at: Some(Utc::now()),
-        base: plan.base.as_ref().map(|b| b.id.clone()),
-        encrypted: plan.encrypted,
-        sources: source_records,
-        registry: registry_records,
-        known_paths: KnownPaths::current(),
-        stats,
-    };
-    let index = FileIndex {
-        format: FORMAT_VERSION,
-        files: entries,
-        registry: registry_exports,
-        warnings: warnings.clone(),
+        finished_at,
+        base,
+        encrypted,
+        split,
+        sources: source_records.clone(),
+        registry: data.registry_records.clone(),
+        known_paths: known_paths.clone(),
+        stats: data.stats.clone(),
     };
 
-    let snapshot_dir = match &store {
-        Store::Plain { snapshot_dir } => {
-            // The index is written first and the header last: a folder without a
-            // header is recognisable as an unfinished backup.
-            let meta = snapshot_dir.join(META_DIR);
-            let index_path = meta.join(INDEX_FILE);
-            fsops::write_json_atomic(&index_path, &index).at("could not write", &index_path)?;
-            let header_path = meta.join(HEADER_FILE);
-            fsops::write_json_atomic(&header_path, &header).at("could not write", &header_path)?;
-            snapshot_dir.clone()
+    let mut plain_header = None;
+    if let Some(snapshot_dir) = &plain_dir {
+        let header = make_header(false, &plain_data, plan.base.as_ref().map(|b| b.id.clone()));
+        let index = FileIndex {
+            format: FORMAT_VERSION,
+            files: plain_data.entries,
+            registry: plain_data.registry_exports,
+            warnings: warnings.clone(),
+        };
+        // The index is written first and the header last: a folder without a
+        // header is recognisable as an unfinished backup.
+        let meta = snapshot_dir.join(META_DIR);
+        let index_path = meta.join(INDEX_FILE);
+        fsops::write_json_atomic(&index_path, &index).at("could not write", &index_path)?;
+        let header_path = meta.join(HEADER_FILE);
+        fsops::write_json_atomic(&header_path, &header).at("could not write", &header_path)?;
+        plain_header = Some(header);
+    }
+
+    let mut encrypted_header = None;
+    if let Some(key) = key {
+        let header = make_header(
+            true,
+            &encrypted_data,
+            plan.encrypted_base.as_ref().map(|b| b.id.clone()),
+        );
+        let sealed = serde_json::to_vec(&EncryptedSnapshot {
+            header: header.clone(),
+            index: FileIndex {
+                format: FORMAT_VERSION,
+                files: encrypted_data.entries,
+                registry: encrypted_data.registry_exports,
+                warnings: warnings.clone(),
+            },
+        })
+        .map_err(|e| {
+            EngineError::io(
+                "could not encode the backup index",
+                std::io::Error::other(e),
+            )
+        })?;
+        let path = vault::snapshot_path(&plan.destination, &id);
+        fsops::write_bytes_atomic(&path, &key.encrypt_bytes(&sealed))
+            .at("could not write", &path)?;
+        encrypted_header = Some(header);
+    }
+
+    let (snapshot_dir, header, encrypted_part) = match (plain_dir, plain_header, encrypted_header) {
+        (Some(dir), Some(plain), encrypted) => (dir, plain, encrypted),
+        (_, _, Some(encrypted)) => (vault::vault_dir(&plan.destination), encrypted, None),
+        _ => {
+            return Err(EngineError::io(
+                "nothing was written",
+                std::io::Error::other("the plan has no parts"),
+            ));
         }
-        Store::Encrypted { key } => {
-            let sealed = serde_json::to_vec(&EncryptedSnapshot {
-                header: header.clone(),
-                index,
-            })
-            .map_err(|e| {
-                EngineError::io(
-                    "could not encode the backup index",
-                    std::io::Error::other(e),
-                )
-            })?;
-            let path = vault::snapshot_path(&plan.destination, &id);
-            fsops::write_bytes_atomic(&path, &key.encrypt_bytes(&sealed))
-                .at("could not write", &path)?;
-            vault::vault_dir(&plan.destination)
-        }
     };
 
-    tracing::info!(
-        status = ?header.status,
-        files = header.stats.files,
-        copied = header.stats.copied_files,
-        linked = header.stats.linked_files,
-        referenced = header.stats.referenced_files,
-        registry = header.stats.registry_keys,
-        failed = header.stats.failed,
-        "backup finished"
-    );
-
-    Ok(BackupReport {
+    let report = BackupReport {
         snapshot_dir,
         header,
+        encrypted_part,
         warnings,
         duration: started.elapsed(),
-    })
+    };
+    let total = report.total_stats();
+    tracing::info!(
+        status = ?report.header.status,
+        split,
+        files = total.files,
+        copied = total.copied_files,
+        linked = total.linked_files,
+        referenced = total.referenced_files,
+        registry = total.registry_keys,
+        failed = total.failed,
+        "backup finished"
+    );
+    Ok(report)
 }
 
+struct ProgramListStore<'a> {
+    plain_dir: Option<&'a Path>,
+    key: Option<&'a VaultKey>,
+}
+
+/// Stores the program list; returns the source record for it.
 fn add_program_list(
-    store: &Store<'_>,
+    store: &ProgramListStore<'_>,
     plan: &BackupPlan,
     id: &str,
-    records: &mut Vec<SourceRecord>,
     entries: &mut Vec<FileEntry>,
     warnings: &mut Vec<String>,
-) {
+) -> Option<SourceRecord> {
     let programs = apps::installed_apps();
     if programs.is_empty() {
-        return;
+        return None;
     }
-    records.push(SourceRecord {
-        key: APPS_DIR.to_string(),
-        name: APPS_DIR.to_string(),
-        path: PathBuf::new(),
-        portable: None,
-        app: None,
-        extra: true,
-    });
 
     let temp = tempfile_path(plan, id);
     let mut files: Vec<(&str, Vec<u8>)> = vec![(
@@ -416,8 +496,8 @@ fn add_program_list(
 
     let now = to_unix_nanos(std::time::SystemTime::now());
     for (name, bytes) in files {
-        let stored = match store {
-            Store::Plain { snapshot_dir } => {
+        let stored = match (store.plain_dir, store.key) {
+            (Some(snapshot_dir), _) => {
                 let path = snapshot_dir.join(APPS_DIR).join(name);
                 fsops::write_bytes_atomic(&path, &bytes)
                     .map(|()| {
@@ -428,10 +508,9 @@ fn add_program_list(
                     })
                     .map_err(|e| e.to_string())
             }
-            Store::Encrypted { key } => {
-                fsops::encrypt_bytes_into_vault(key, &plan.destination, &bytes)
-                    .map_err(|e| e.to_string())
-            }
+            (None, Some(key)) => fsops::encrypt_bytes_into_vault(key, &plan.destination, &bytes)
+                .map_err(|e| e.to_string()),
+            (None, None) => Err("no storage for the program list".to_string()),
         };
         match stored {
             Ok((blob, sha256)) => entries.push(FileEntry {
@@ -445,6 +524,14 @@ fn add_program_list(
             Err(err) => warnings.push(format!("{name}: {err}")),
         }
     }
+    Some(SourceRecord {
+        key: APPS_DIR.to_string(),
+        name: APPS_DIR.to_string(),
+        path: PathBuf::new(),
+        portable: None,
+        app: None,
+        extra: true,
+    })
 }
 
 fn sha(bytes: &[u8]) -> [u8; 32] {
@@ -461,12 +548,12 @@ fn tempfile_path(plan: &BackupPlan, id: &str) -> PathBuf {
 }
 
 /// `Applications/Firefox` → `Applications\Firefox`.
-fn key_path(key: &str) -> PathBuf {
+pub(crate) fn key_path(key: &str) -> PathBuf {
     key.split('/').collect()
 }
 
 /// `2026-09-14 20-00`, with ` (COMPUTER)` if other computers use the same
-/// destination and `-2`, `-3` … if the minute is already taken.
+/// destination and `-2`, `-3` … if the minute is already taken (in either part).
 fn new_snapshot_id(plan: &BackupPlan) -> EngineResult<String> {
     let base = Local::now().format("%Y-%m-%d %H-%M").to_string();
     let suffix = if snapshots::has_other_computers(&plan.destination, &plan.computer) {
@@ -480,13 +567,13 @@ fn new_snapshot_id(plan: &BackupPlan) -> EngineResult<String> {
         } else {
             format!("{base}-{n}{suffix}")
         };
-        if plan.encrypted {
-            if !vault::snapshot_path(&plan.destination, &id).exists() {
-                return Ok(id);
-            }
+        let dir = plan.destination.join(&id);
+        if vault::snapshot_path(&plan.destination, &id).exists() || dir.exists() {
             continue;
         }
-        let dir = plan.destination.join(&id);
+        if !plan.plain_part {
+            return Ok(id);
+        }
         match fsops::create_new_dir(&dir) {
             Ok(()) => return Ok(id),
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -503,6 +590,3 @@ fn new_snapshot_id(plan: &BackupPlan) -> EngineResult<String> {
         std::io::Error::from(std::io::ErrorKind::AlreadyExists),
     ))
 }
-
-#[allow(dead_code)]
-fn _assert_path(_: &Path) {}

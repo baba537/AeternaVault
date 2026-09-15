@@ -295,6 +295,68 @@ fn set_up_encryption_and_back_up_encrypted() {
     );
 }
 
+#[test]
+fn check_browse_and_delete_a_backup_in_the_backups_view() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut harness = harness(tmp.path(), |config| {
+        config.advanced.confirm_before_start = false;
+    });
+    click(&mut harness, "Back up now");
+    wait_until(&mut harness, "backup result", |app| {
+        matches!(app.screen, Screen::Done(_))
+    });
+    click(&mut harness, "Back to overview");
+
+    let ctx = harness.ctx.clone();
+    harness.state_mut().view = View::Backups;
+    harness.state_mut().refresh_snapshots(&ctx);
+    wait_until(&mut harness, "backup list", |app| {
+        !app.all_snapshots().is_empty()
+    });
+    let id = harness.state().all_snapshots()[0].qualified_id();
+    harness.state_mut().manage.checked.insert(id);
+    harness.step();
+
+    // Check it.
+    click(&mut harness, "Check");
+    wait_until(&mut harness, "check result", |app| {
+        matches!(app.screen, Screen::Done(_))
+    });
+    match &harness.state().screen {
+        Screen::Done(done) => match done.as_ref() {
+            Done::Verify(Ok(report)) => assert!(report.is_ok() && report.files == 2),
+            _ => panic!("check did not succeed"),
+        },
+        _ => unreachable!(),
+    }
+    click(&mut harness, "Back to overview");
+
+    // Browse it.
+    click(&mut harness, "Browse…");
+    wait_until(&mut harness, "contents", |app| {
+        matches!(app.screen, Screen::Browse(_))
+    });
+    // Panics if the file is not listed.
+    let _ = harness.get_by_label("Docs/letter.txt");
+    click(&mut harness, "Back");
+
+    // Delete it.
+    click(&mut harness, "Delete…");
+    assert!(harness.state().pending.is_some());
+    harness
+        .get_all_by_label("Delete…")
+        .last()
+        .expect("confirm button")
+        .click();
+    harness.step();
+    wait_until(&mut harness, "delete result", |app| {
+        matches!(app.screen, Screen::Done(_))
+    });
+    wait_until(&mut harness, "empty list", |app| {
+        app.all_snapshots().is_empty()
+    });
+}
+
 fn demo_schedules(config: &Config) -> Vec<crate::config::Schedule> {
     use crate::config::{Frequency, Schedule};
     let mut documents = Schedule {
@@ -425,6 +487,7 @@ fn render_readme_screenshots() {
         passphrase: "quiet archive of many summers".into(),
         repeat: "quiet archive of many summers".into(),
         remember: true,
+        options: crate::engine::vault::VaultOptions::default(),
         error: None,
     });
     settle(&mut h);

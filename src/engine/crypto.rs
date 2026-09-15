@@ -2,7 +2,8 @@
 //!
 //! Building blocks (RustCrypto, pure Rust, widely reviewed):
 //! * **Argon2id** turns a passphrase (or recovery key) into a key-encryption key.
-//! * **XChaCha20-Poly1305** encrypts and authenticates everything.
+//! * **XChaCha20-Poly1305** (default) or **AES-256-GCM** encrypts and
+//!   authenticates the data; the choice is made when a vault is created.
 //! * **HMAC-SHA-256** derives sub-keys and content-based blob names.
 //!
 //! A random 256-bit *vault key* protects all data. It is stored only in
@@ -11,11 +12,12 @@
 //! without re-encrypting any backup.
 //!
 //! File contents use a chunked "STREAM" construction: 1 MiB chunks, each with
-//! its own nonce made of a random 19-byte prefix, a 32-bit counter and a
+//! its own nonce made of a per-stream value, a 32-bit counter and a
 //! final-chunk flag. Reordering, truncating or appending chunks is detected.
 
 use std::io::{self, Read, Write};
 
+use aes_gcm::Aes256Gcm;
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::XChaCha20Poly1305;
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -29,7 +31,44 @@ use super::CancelToken;
 pub const CHUNK_SIZE: usize = 1024 * 1024;
 const TAG_SIZE: usize = 16;
 const PREFIX_SIZE: usize = 19;
+const SALT_SIZE: usize = 32;
+/// Stream encrypted with XChaCha20-Poly1305.
 pub const BLOB_MAGIC: &[u8; 4] = b"AVB1";
+/// Stream encrypted with AES-256-GCM.
+pub const GCM_MAGIC: &[u8; 4] = b"AVG1";
+
+/// The cipher for the data of a vault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Cipher {
+    /// Fast on every processor, 192-bit nonces. The default.
+    #[default]
+    XChaCha20Poly1305,
+    /// The widely standardised alternative; fast with AES hardware support.
+    Aes256Gcm,
+}
+
+impl Cipher {
+    pub const ALL: [Cipher; 2] = [Cipher::XChaCha20Poly1305, Cipher::Aes256Gcm];
+
+    /// Value of `cipher` in `vault.json`.
+    pub fn header_name(self) -> &'static str {
+        match self {
+            Cipher::XChaCha20Poly1305 => "argon2id+xchacha20poly1305-stream-1mib",
+            Cipher::Aes256Gcm => "argon2id+aes256gcm-stream-1mib",
+        }
+    }
+
+    pub fn from_header_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.header_name() == name)
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Cipher::XChaCha20Poly1305 => "XChaCha20-Poly1305",
+            Cipher::Aes256Gcm => "AES-256-GCM",
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum CryptoError {
@@ -78,6 +117,19 @@ impl KdfParams {
     pub const PASSPHRASE: Self = Self {
         memory_kib: 64 * 1024,
         iterations: 3,
+        parallelism: 1,
+    };
+    /// 256 MiB, 4 passes: about two seconds, much slower to guess.
+    pub const STRONG: Self = Self {
+        memory_kib: 256 * 1024,
+        iterations: 4,
+        parallelism: 1,
+    };
+    /// 1 GiB, 4 passes: for new computers; unlocking takes several seconds
+    /// and needs that much free memory.
+    pub const VERY_STRONG: Self = Self {
+        memory_kib: 1024 * 1024,
+        iterations: 4,
         parallelism: 1,
     };
     /// Recovery keys already carry 160 bits of randomness.
@@ -144,7 +196,8 @@ impl KeySlot {
         })
     }
 
-    pub fn open(&self, secret: &str) -> Result<VaultKey, CryptoError> {
+    /// Unwraps the vault key; `data_cipher` is the vault's cipher from its header.
+    pub fn open(&self, secret: &str, data_cipher: Cipher) -> Result<VaultKey, CryptoError> {
         let secret = normalize_secret(self.kind, secret);
         let salt = unhex(&self.salt).ok_or(CryptoError::Damaged)?;
         let nonce: [u8; 24] = unhex(&self.nonce)
@@ -160,7 +213,7 @@ impl KeySlot {
             .try_into()
             .map_err(|_| CryptoError::Damaged)?;
         master.zeroize();
-        Ok(VaultKey::from_master(key))
+        Ok(VaultKey::from_master(key, data_cipher))
     }
 }
 
@@ -209,11 +262,12 @@ pub struct VaultKey {
     master: Zeroizing<[u8; 32]>,
     data: Zeroizing<[u8; 32]>,
     names: Zeroizing<[u8; 32]>,
+    cipher: Cipher,
 }
 
 impl Clone for VaultKey {
     fn clone(&self) -> Self {
-        Self::from_master(*self.master)
+        Self::from_master(*self.master, self.cipher)
     }
 }
 
@@ -223,21 +277,63 @@ impl std::fmt::Debug for VaultKey {
     }
 }
 
-impl VaultKey {
-    pub fn generate() -> Self {
-        Self::from_master(random_bytes())
+/// The AEAD for one encrypted stream.
+enum StreamCipher {
+    /// Nonce: 19 random bytes ‖ counter (u32, big-endian) ‖ last-chunk flag.
+    XChaCha {
+        aead: XChaCha20Poly1305,
+        prefix: [u8; PREFIX_SIZE],
+    },
+    /// Key: HMAC-SHA-256(data key, label ‖ random salt), so every stream has
+    /// its own key. Nonce: 7 zero bytes ‖ counter (u32, big-endian) ‖ flag.
+    Gcm(Box<Aes256Gcm>),
+}
+
+impl StreamCipher {
+    fn seal(&self, counter: u32, last: bool, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        match self {
+            StreamCipher::XChaCha { aead, prefix } => aead
+                .encrypt(&chunk_nonce(prefix, counter, last).into(), data)
+                .map_err(|_| CryptoError::Damaged),
+            StreamCipher::Gcm(aead) => aead
+                .encrypt(&gcm_nonce(counter, last).into(), data)
+                .map_err(|_| CryptoError::Damaged),
+        }
     }
 
-    pub fn from_master(master: [u8; 32]) -> Self {
+    fn open(&self, counter: u32, last: bool, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        match self {
+            StreamCipher::XChaCha { aead, prefix } => aead
+                .decrypt(&chunk_nonce(prefix, counter, last).into(), data)
+                .map_err(|_| CryptoError::Damaged),
+            StreamCipher::Gcm(aead) => aead
+                .decrypt(&gcm_nonce(counter, last).into(), data)
+                .map_err(|_| CryptoError::Damaged),
+        }
+    }
+}
+
+impl VaultKey {
+    pub fn generate(cipher: Cipher) -> Self {
+        Self::from_master(random_bytes(), cipher)
+    }
+
+    pub fn from_master(master: [u8; 32], cipher: Cipher) -> Self {
         Self {
             data: Zeroizing::new(hmac(&master, b"AeternaVault v1 data key")),
             names: Zeroizing::new(hmac(&master, b"AeternaVault v1 name key")),
             master: Zeroizing::new(master),
+            cipher,
         }
     }
 
     pub fn master_bytes(&self) -> &[u8; 32] {
         &self.master
+    }
+
+    #[cfg(test)]
+    pub fn cipher(&self) -> Cipher {
+        self.cipher
     }
 
     /// Blob name for a file content: unlinkable to the content without the key,
@@ -251,6 +347,62 @@ impl VaultKey {
         hex(&hmac(self.master.as_ref(), b"AeternaVault v1 key check")[..8])
     }
 
+    fn gcm_stream(&self, salt: &[u8; SALT_SIZE]) -> StreamCipher {
+        let mut input = Vec::with_capacity(40 + SALT_SIZE);
+        input.extend_from_slice(b"AeternaVault v1 AES-GCM stream key");
+        input.extend_from_slice(salt);
+        let key = Zeroizing::new(hmac(self.data.as_ref(), &input));
+        StreamCipher::Gcm(Box::new(Aes256Gcm::new(&(*key).into())))
+    }
+
+    /// Writes the stream header for this key's cipher.
+    fn start_stream(&self, output: &mut dyn Write) -> Result<StreamCipher, CryptoError> {
+        match self.cipher {
+            Cipher::XChaCha20Poly1305 => {
+                let prefix: [u8; PREFIX_SIZE] = random_bytes();
+                output.write_all(BLOB_MAGIC)?;
+                output.write_all(&prefix)?;
+                Ok(StreamCipher::XChaCha {
+                    aead: cipher(&self.data),
+                    prefix,
+                })
+            }
+            Cipher::Aes256Gcm => {
+                let salt: [u8; SALT_SIZE] = random_bytes();
+                output.write_all(GCM_MAGIC)?;
+                output.write_all(&salt)?;
+                Ok(self.gcm_stream(&salt))
+            }
+        }
+    }
+
+    /// Reads a stream header. Both ciphers can be read with any key of the
+    /// vault, because the header names the cipher.
+    fn resume_stream(&self, input: &mut dyn Read) -> Result<StreamCipher, CryptoError> {
+        let mut magic = [0u8; 4];
+        input
+            .read_exact(&mut magic)
+            .map_err(|_| CryptoError::Damaged)?;
+        if &magic == BLOB_MAGIC {
+            let mut prefix = [0u8; PREFIX_SIZE];
+            input
+                .read_exact(&mut prefix)
+                .map_err(|_| CryptoError::Damaged)?;
+            Ok(StreamCipher::XChaCha {
+                aead: cipher(&self.data),
+                prefix,
+            })
+        } else if &magic == GCM_MAGIC {
+            let mut salt = [0u8; SALT_SIZE];
+            input
+                .read_exact(&mut salt)
+                .map_err(|_| CryptoError::Damaged)?;
+            Ok(self.gcm_stream(&salt))
+        } else {
+            Err(CryptoError::Damaged)
+        }
+    }
+
     /// Encrypts a stream. Returns the SHA-256 of the plaintext.
     pub fn encrypt_stream(
         &self,
@@ -259,11 +411,7 @@ impl VaultKey {
         cancel: &CancelToken,
         on_bytes: &mut dyn FnMut(u64),
     ) -> Result<[u8; 32], CryptoError> {
-        let aead = cipher(&self.data);
-        let prefix: [u8; PREFIX_SIZE] = random_bytes();
-        output.write_all(BLOB_MAGIC)?;
-        output.write_all(&prefix)?;
-
+        let stream = self.start_stream(output)?;
         let mut hasher = Sha256::new();
         let mut current = read_up_to(input, CHUNK_SIZE)?;
         let mut counter: u32 = 0;
@@ -278,10 +426,7 @@ impl VaultKey {
             };
             let last = next.is_empty();
             hasher.update(&current);
-            let nonce = chunk_nonce(&prefix, counter, last);
-            let sealed = aead
-                .encrypt(&nonce.into(), current.as_slice())
-                .map_err(|_| CryptoError::Damaged)?;
+            let sealed = stream.seal(counter, last, &current)?;
             output.write_all(&sealed)?;
             on_bytes(current.len() as u64);
             current.zeroize();
@@ -305,16 +450,7 @@ impl VaultKey {
         cancel: &CancelToken,
         on_bytes: &mut dyn FnMut(u64),
     ) -> Result<[u8; 32], CryptoError> {
-        let aead = cipher(&self.data);
-        let mut header = [0u8; 4 + PREFIX_SIZE];
-        input
-            .read_exact(&mut header)
-            .map_err(|_| CryptoError::Damaged)?;
-        if &header[..4] != BLOB_MAGIC {
-            return Err(CryptoError::Damaged);
-        }
-        let prefix: [u8; PREFIX_SIZE] = header[4..].try_into().map_err(|_| CryptoError::Damaged)?;
-
+        let stream = self.resume_stream(input)?;
         let sealed_size = CHUNK_SIZE + TAG_SIZE;
         let mut hasher = Sha256::new();
         let mut current = read_up_to(input, sealed_size)?;
@@ -332,10 +468,7 @@ impl VaultKey {
                 Vec::new()
             };
             let last = next.is_empty();
-            let nonce = chunk_nonce(&prefix, counter, last);
-            let mut plain = aead
-                .decrypt(&nonce.into(), current.as_slice())
-                .map_err(|_| CryptoError::Damaged)?;
+            let mut plain = stream.open(counter, last, &current)?;
             hasher.update(&plain);
             output.write_all(&plain)?;
             on_bytes(plain.len() as u64);
@@ -385,6 +518,13 @@ fn chunk_nonce(prefix: &[u8; PREFIX_SIZE], counter: u32, last: bool) -> [u8; 24]
     nonce
 }
 
+fn gcm_nonce(counter: u32, last: bool) -> [u8; 12] {
+    let mut nonce = [0u8; 12];
+    nonce[7..11].copy_from_slice(&counter.to_be_bytes());
+    nonce[11] = u8::from(last);
+    nonce
+}
+
 fn read_up_to(input: &mut dyn Read, size: usize) -> io::Result<Vec<u8>> {
     let mut buffer = Vec::with_capacity(size.min(CHUNK_SIZE + TAG_SIZE));
     input.take(size as u64).read_to_end(&mut buffer)?;
@@ -425,56 +565,79 @@ pub fn passphrase_strength(passphrase: &str) -> u8 {
 mod tests {
     use super::*;
 
-    fn roundtrip(size: usize) {
-        let key = VaultKey::generate();
+    fn roundtrip(cipher: Cipher, size: usize) {
+        let key = VaultKey::generate(cipher);
         let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
         let sealed = key.encrypt_bytes(&data);
         assert_eq!(key.decrypt_bytes(&sealed).unwrap(), data);
     }
 
     #[test]
-    fn roundtrips_various_sizes() {
-        for size in [
-            0,
-            1,
-            100,
-            CHUNK_SIZE - 1,
-            CHUNK_SIZE,
-            CHUNK_SIZE + 1,
-            2 * CHUNK_SIZE + 17,
-        ] {
-            roundtrip(size);
+    fn roundtrips_various_sizes_with_both_ciphers() {
+        for cipher in Cipher::ALL {
+            for size in [
+                0,
+                1,
+                100,
+                CHUNK_SIZE - 1,
+                CHUNK_SIZE,
+                CHUNK_SIZE + 1,
+                2 * CHUNK_SIZE + 17,
+            ] {
+                roundtrip(cipher, size);
+            }
         }
     }
 
     #[test]
+    fn a_key_reads_streams_of_either_cipher() {
+        let master = random_bytes();
+        let chacha = VaultKey::from_master(master, Cipher::XChaCha20Poly1305);
+        let gcm = VaultKey::from_master(master, Cipher::Aes256Gcm);
+        let sealed = gcm.encrypt_bytes(b"archive");
+        assert_eq!(&sealed[..4], GCM_MAGIC);
+        assert_eq!(chacha.decrypt_bytes(&sealed).unwrap(), b"archive");
+        // The same plaintext never gives the same ciphertext.
+        assert_ne!(sealed, gcm.encrypt_bytes(b"archive"));
+    }
+
+    #[test]
     fn detects_tampering_truncation_and_wrong_key() {
-        let key = VaultKey::generate();
-        let data = vec![7u8; CHUNK_SIZE + 5];
-        let sealed = key.encrypt_bytes(&data);
+        for cipher in Cipher::ALL {
+            let key = VaultKey::generate(cipher);
+            let data = vec![7u8; CHUNK_SIZE + 5];
+            let sealed = key.encrypt_bytes(&data);
+            let header = match cipher {
+                Cipher::XChaCha20Poly1305 => 4 + PREFIX_SIZE,
+                Cipher::Aes256Gcm => 4 + SALT_SIZE,
+            };
 
-        let mut flipped = sealed.clone();
-        flipped[40] ^= 1;
-        assert!(matches!(
-            key.decrypt_bytes(&flipped),
-            Err(CryptoError::Damaged)
-        ));
+            let mut flipped = sealed.clone();
+            flipped[header + 3] ^= 1;
+            assert!(matches!(
+                key.decrypt_bytes(&flipped),
+                Err(CryptoError::Damaged)
+            ));
 
-        // Cutting off the final chunk leaves a chunk that is not marked as last.
-        let truncated = &sealed[..4 + PREFIX_SIZE + CHUNK_SIZE + TAG_SIZE];
-        assert!(key.decrypt_bytes(truncated).is_err());
+            // Cutting off the final chunk leaves a chunk that is not marked as last.
+            let truncated = &sealed[..header + CHUNK_SIZE + TAG_SIZE];
+            assert!(key.decrypt_bytes(truncated).is_err());
 
-        let other = VaultKey::generate();
-        assert!(other.decrypt_bytes(&sealed).is_err());
+            let other = VaultKey::generate(cipher);
+            assert!(other.decrypt_bytes(&sealed).is_err());
+        }
     }
 
     #[test]
     fn key_slots_unlock_only_with_the_right_secret() {
-        let key = VaultKey::generate();
+        let key = VaultKey::generate(Cipher::default());
         let slot =
             KeySlot::create(SlotKind::Passphrase, "correct horse", &key, KdfParams::TEST).unwrap();
-        assert!(matches!(slot.open("wrong"), Err(CryptoError::WrongKey)));
-        let opened = slot.open("correct horse").unwrap();
+        assert!(matches!(
+            slot.open("wrong", Cipher::default()),
+            Err(CryptoError::WrongKey)
+        ));
+        let opened = slot.open("correct horse", Cipher::default()).unwrap();
         assert_eq!(opened.master_bytes(), key.master_bytes());
 
         let recovery = new_recovery_key();
@@ -483,15 +646,17 @@ mod tests {
             KeySlot::create(SlotKind::RecoveryKey, &recovery, &key, KdfParams::TEST).unwrap();
         let sloppy = recovery.to_lowercase().replace('-', " ");
         assert_eq!(
-            slot.open(&sloppy).unwrap().master_bytes(),
+            slot.open(&sloppy, Cipher::default())
+                .unwrap()
+                .master_bytes(),
             key.master_bytes()
         );
     }
 
     #[test]
     fn blob_ids_are_deterministic_per_key() {
-        let a = VaultKey::generate();
-        let b = VaultKey::generate();
+        let a = VaultKey::generate(Cipher::default());
+        let b = VaultKey::generate(Cipher::default());
         let digest = Sha256::digest(b"content");
         assert_eq!(a.blob_id(&digest), a.blob_id(&digest));
         assert_ne!(a.blob_id(&digest), b.blob_id(&digest));
