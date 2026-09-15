@@ -218,6 +218,26 @@ fn damaged_backup_is_detected_on_restore() {
 }
 
 #[test]
+fn chosen_destination_gets_an_app_folder() {
+    let tmp = tempfile::tempdir().unwrap();
+    let drive = tmp.path().join("Backup drive");
+    fs::create_dir_all(&drive).unwrap();
+    assert_eq!(
+        snapshots::chosen_destination(&drive, true),
+        drive.join(snapshots::APP_FOLDER)
+    );
+    assert_eq!(snapshots::chosen_destination(&drive, false), drive);
+
+    let named = tmp.path().join("aeternavault");
+    assert_eq!(snapshots::chosen_destination(&named, true), named);
+
+    // A folder that already holds backups is used as it is.
+    let existing = tmp.path().join("Old backups");
+    fs::create_dir_all(existing.join("2026-09-14 20-00").join(META_DIR)).unwrap();
+    assert_eq!(snapshots::chosen_destination(&existing, true), existing);
+}
+
+#[test]
 fn destination_inside_source_is_skipped() {
     let (_tmp, source, mut config) = setup();
     config.destination = source.join("Backups");

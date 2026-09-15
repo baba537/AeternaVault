@@ -46,7 +46,8 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
             }
             Some(Ok(list)) => {
                 egui::ScrollArea::vertical()
-                    .max_height(300.0)
+                    .max_height(320.0)
+                    .min_scrolled_height(260.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         for info in list {

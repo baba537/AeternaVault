@@ -5,6 +5,10 @@
 //! * an in-memory ring buffer shown in the GUI's "Activity" view,
 //! * stderr when running as a command-line tool (warnings and errors only).
 //!
+//! Libraries (wgpu, egui, winit …) log a lot of technical detail. Only their
+//! warnings and errors reach the log file, and the Activity view shows
+//! AeternaVault's own messages only.
+//!
 //! Set `AETERNAVAULT_LOG=debug` for more detail.
 
 use std::collections::VecDeque;
@@ -13,10 +17,10 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Local};
 use tracing::field::{Field, Visit};
-use tracing::{Event, Level, Subscriber};
+use tracing::{Event, Level, Metadata, Subscriber};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::filter::{LevelFilter, filter_fn};
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, fmt};
@@ -24,6 +28,22 @@ use tracing_subscriber::{Layer, fmt};
 use crate::paths::AppPaths;
 
 const BUFFER_LINES: usize = 2000;
+
+/// Events of this crate have targets like `AeternaVault::gui::actions`.
+const OWN_TARGET: &str = env!("CARGO_CRATE_NAME");
+
+pub fn is_own_event(metadata: &Metadata<'_>) -> bool {
+    let target = metadata.target();
+    target == OWN_TARGET
+        || target
+            .strip_prefix(OWN_TARGET)
+            .is_some_and(|rest| rest.starts_with("::"))
+}
+
+/// Own events at the chosen level; other crates only with warnings and errors.
+fn file_worthy(metadata: &Metadata<'_>) -> bool {
+    is_own_event(metadata) || *metadata.level() <= Level::WARN
+}
 
 #[derive(Debug, Clone)]
 pub struct LogLine {
@@ -81,7 +101,8 @@ pub fn init(paths: &AppPaths, console: bool) -> Logging {
             let layer = fmt::layer()
                 .with_ansi(false)
                 .with_target(false)
-                .with_writer(writer);
+                .with_writer(writer)
+                .with_filter(filter_fn(file_worthy));
             (Some(layer), Some(guard))
         }
         Err(err) => {
@@ -95,15 +116,19 @@ pub fn init(paths: &AppPaths, console: bool) -> Logging {
             .with_target(false)
             .with_writer(std::io::stderr)
             .with_filter(if console { LevelFilter::WARN } else { level })
+            .with_filter(filter_fn(file_worthy))
     });
 
     let _ = tracing_subscriber::registry()
         .with(level)
         .with(file_layer)
         .with(console_layer)
-        .with(GuiLayer {
-            buffer: buffer.clone(),
-        })
+        .with(
+            GuiLayer {
+                buffer: buffer.clone(),
+            }
+            .with_filter(filter_fn(is_own_event)),
+        )
         .try_init();
 
     Logging {

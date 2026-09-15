@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Shared cancellation flag, checked between files and between copy chunks.
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CancelToken(Arc<AtomicBool>);
 
 impl CancelToken {
@@ -63,6 +63,19 @@ pub struct Progress {
     pub files_total: u64,
     pub bytes_done: u64,
     pub bytes_total: u64,
+}
+
+impl Progress {
+    /// Share of the work done, if the total is known.
+    pub fn fraction(&self) -> Option<f32> {
+        if self.bytes_total > 0 {
+            Some((self.bytes_done as f64 / self.bytes_total as f64).clamp(0.0, 1.0) as f32)
+        } else if self.files_total > 0 {
+            Some((self.files_done as f64 / self.files_total as f64).clamp(0.0, 1.0) as f32)
+        } else {
+            None
+        }
+    }
 }
 
 /// Rate-limits progress callbacks so millions of small files do not flood the UI.

@@ -1,4 +1,4 @@
-//! Command-line interface for unattended use, e.g. from the Task Scheduler:
+//! Command-line interface for unattended use and scripts:
 //!
 //! ```text
 //! AeternaVault.exe backup                 back up with the saved settings
@@ -17,25 +17,21 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::config::{BackupMode, Config, ConflictPolicy, Loaded};
-use crate::engine::crypto::VaultKey;
+use crate::automatic::{self, unattended_key};
+use crate::config::{BackupMode, ConflictPolicy, Loaded};
 use crate::engine::export::{self, ExportLabels};
 use crate::engine::manifest::SnapshotStatus;
 use crate::engine::plan::{self, BackupInput, ItemKind, Plan, RestoreOptions, RestoreTarget};
 use crate::engine::sources::Sources;
-use crate::engine::{CancelToken, backup, restore, snapshots, vault};
-use crate::error::EngineError;
+use crate::engine::{CancelToken, backup, restore, snapshots};
 use crate::i18n::Lang;
 use crate::paths::AppPaths;
 use crate::platform::apps::Catalog;
 use crate::platform::known_paths::KnownPaths;
 use crate::platform::{self, vss::LiveFiles};
-use crate::state::{self, AutomaticOutcome, AutomaticRun, State};
-
-pub const PASSPHRASE_ENV: &str = "AETERNAVAULT_PASSPHRASE";
+use crate::state::State;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -45,6 +41,10 @@ pub const PASSPHRASE_ENV: &str = "AETERNAVAULT_PASSPHRASE";
     after_help = "Without a command, the graphical interface starts."
 )]
 pub struct Args {
+    /// Start without a window, in the notification area (used by "Start with Windows").
+    #[arg(long, global = false)]
+    pub background: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -103,18 +103,6 @@ impl From<ConflictArg> for ConflictPolicy {
             ConflictArg::KeepNewer => ConflictPolicy::KeepNewer,
         }
     }
-}
-
-/// The vault key from the remembered key file or `AETERNAVAULT_PASSPHRASE`.
-pub fn unattended_key(paths: &AppPaths, config: &Config) -> Option<VaultKey> {
-    let header = vault::read_header(&config.destination).ok()?;
-    if let Some(key) = vault::remembered_key(&state::key_dir(&paths.config_file), &header) {
-        return Some(key);
-    }
-    let passphrase = std::env::var(PASSPHRASE_ENV).ok()?;
-    vault::unlock(&config.destination, &passphrase)
-        .ok()
-        .map(|(_, key)| key)
 }
 
 pub fn run(command: Command, paths: &AppPaths, loaded: Loaded) -> ExitCode {
@@ -179,11 +167,32 @@ pub fn run(command: Command, paths: &AppPaths, loaded: Loaded) -> ExitCode {
             csv,
             scheduled,
         } => {
-            if scheduled {
-                platform::enter_background_mode();
-            }
             if full {
                 config.mode = BackupMode::Full;
+            }
+            if scheduled {
+                // Unattended run, e.g. from a task someone set up themselves.
+                platform::enter_background_mode();
+                let (run, report) = automatic::run_unattended(
+                    paths,
+                    &config,
+                    None,
+                    "backup --scheduled",
+                    &cancel,
+                    &mut quiet,
+                );
+                State::update(&paths.config_file, |state| {
+                    state.last_automatic = Some(run.clone());
+                });
+                if let Some(report) = &report {
+                    println!("{}", report.snapshot_dir.display());
+                }
+                return match run.outcome {
+                    crate::state::AutomaticOutcome::Complete
+                    | crate::state::AutomaticOutcome::DestinationUnavailable => ExitCode::SUCCESS,
+                    crate::state::AutomaticOutcome::CompleteWithNotes => ExitCode::from(2),
+                    _ => fail(&run.message),
+                };
             }
             let config_dir = paths
                 .config_file
@@ -203,20 +212,6 @@ pub fn run(command: Command, paths: &AppPaths, loaded: Loaded) -> ExitCode {
                 .then(|| unattended_key(paths, &config))
                 .flatten();
 
-            let record = |outcome: AutomaticOutcome, message: String, files: u64, bytes: u64| {
-                if scheduled {
-                    let mut state = State::load(&paths.config_file);
-                    state.last_automatic = Some(AutomaticRun {
-                        at: Utc::now(),
-                        outcome,
-                        message,
-                        files,
-                        bytes,
-                    });
-                    state.save(&paths.config_file);
-                }
-            };
-
             let input = BackupInput {
                 config: &config,
                 sources: &sources,
@@ -226,24 +221,7 @@ pub fn run(command: Command, paths: &AppPaths, loaded: Loaded) -> ExitCode {
             };
             let plan = match plan::plan_backup(&input, &cancel, &mut quiet) {
                 Ok(plan) => plan,
-                Err(err) => {
-                    let outcome = match err {
-                        EngineError::DestinationUnavailable(_) => {
-                            AutomaticOutcome::DestinationUnavailable
-                        }
-                        EngineError::Locked | EngineError::EncryptionNotSetUp => {
-                            AutomaticOutcome::NeedsPassphrase
-                        }
-                        _ => AutomaticOutcome::Failed,
-                    };
-                    record(outcome, err.to_string(), 0, 0);
-                    // An unplugged external drive is expected, not an error.
-                    if scheduled && outcome == AutomaticOutcome::DestinationUnavailable {
-                        tracing::info!("automatic backup skipped: {err}");
-                        return ExitCode::SUCCESS;
-                    }
-                    return fail(&err);
-                }
+                Err(err) => return fail(&err),
             };
             print_summary(&plan, lang, false);
             if let Some(path) = csv
@@ -271,32 +249,13 @@ pub fn run(command: Command, paths: &AppPaths, loaded: Loaded) -> ExitCode {
                     for warning in &report.warnings {
                         println!("  note: {warning}");
                     }
-                    let complete = report.header.status == SnapshotStatus::Complete;
-                    record(
-                        if complete {
-                            AutomaticOutcome::Complete
-                        } else {
-                            AutomaticOutcome::CompleteWithNotes
-                        },
-                        report.warnings.first().cloned().unwrap_or_default(),
-                        stats.files,
-                        stats.bytes,
-                    );
-                    if complete {
+                    if report.header.status == SnapshotStatus::Complete {
                         ExitCode::SUCCESS
                     } else {
                         ExitCode::from(2)
                     }
                 }
-                Err(err) => {
-                    let outcome = if matches!(err, EngineError::AlreadyRunning) {
-                        AutomaticOutcome::AlreadyRunning
-                    } else {
-                        AutomaticOutcome::Failed
-                    };
-                    record(outcome, err.to_string(), 0, 0);
-                    fail(&err)
-                }
+                Err(err) => fail(&err),
             }
         }
 

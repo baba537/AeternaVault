@@ -130,6 +130,11 @@ pub struct Advanced {
     /// Save a list of installed programs (and a `winget` export if available)
     /// with every backup, to make reinstalling on a new computer easier.
     pub save_program_list: bool,
+    /// When a destination is chosen, create an `AeternaVault` folder inside it.
+    pub destination_app_folder: bool,
+    /// Draw the window with OpenGL instead of Direct3D 12 (for graphics drivers
+    /// that show glitches). Takes effect on the next start.
+    pub compatibility_graphics: bool,
 }
 
 impl Default for Advanced {
@@ -141,6 +146,8 @@ impl Default for Advanced {
             verify_on_restore: true,
             restore_conflict: ConflictPolicy::default(),
             save_program_list: true,
+            destination_app_folder: true,
+            compatibility_graphics: false,
         }
     }
 }
@@ -165,8 +172,9 @@ pub enum Frequency {
     Weekly,
     /// Every few hours.
     Hourly,
-    /// A few minutes after signing in to Windows.
-    AtLogon,
+    /// A few minutes after AeternaVault starts (with Windows: after signing in).
+    #[serde(alias = "at-logon")]
+    AtStart,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -194,10 +202,16 @@ impl Weekday {
     ];
 }
 
-/// Automatic backups (Windows Task Scheduler).
+/// One automatic backup. AeternaVault itself runs them while it is open or
+/// waiting in the notification area (see [`crate::automatic`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Schedule {
+    /// Stable identifier, used to remember when the schedule last ran.
+    pub id: String,
+    /// Optional name chosen by the user; a description is shown otherwise.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub name: String,
     pub enabled: bool,
     pub frequency: Frequency,
     /// "HH:MM", local time.
@@ -207,18 +221,77 @@ pub struct Schedule {
     /// Run as soon as possible if the computer was off at the planned time.
     pub catch_up: bool,
     pub only_on_ac_power: bool,
+    /// Back up all ticked folders; otherwise only those in `folders`.
+    pub all_folders: bool,
+    /// Folders (by path) this schedule backs up when `all_folders` is off.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<PathBuf>,
+    /// Whether the chosen application settings are included.
+    pub applications: bool,
 }
 
 impl Default for Schedule {
     fn default() -> Self {
         Self {
-            enabled: false,
+            id: String::new(),
+            name: String::new(),
+            enabled: true,
             frequency: Frequency::Daily,
             time: "20:00".into(),
             weekday: Weekday::Sunday,
             every_hours: 4,
             catch_up: true,
             only_on_ac_power: false,
+            all_folders: true,
+            folders: Vec::new(),
+            applications: true,
+        }
+    }
+}
+
+impl Schedule {
+    pub fn new_id() -> String {
+        crate::engine::crypto::hex(&crate::engine::crypto::random_bytes::<4>())
+    }
+
+    /// Whether this schedule covers everything that is ticked.
+    pub fn is_everything(&self) -> bool {
+        self.all_folders && self.applications
+    }
+}
+
+/// Reads `schedule` either as the single table of AeternaVault 0.2 or as a
+/// list of `[[schedule]]` tables.
+fn schedules_compat<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Schedule>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        Many(Vec<Schedule>),
+        One(Box<Schedule>),
+    }
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::Many(list) => list,
+        // 0.2 always wrote a schedule table; a switched-off one is not worth keeping.
+        OneOrMany::One(single) if single.enabled => vec![*single],
+        OneOrMany::One(_) => Vec::new(),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Background {
+    /// Keep running in the notification area when the window is closed while
+    /// automatic backups are switched on.
+    pub keep_running: bool,
+    /// Whether the user has already been told that closing keeps the app running.
+    pub close_hint_shown: bool,
+}
+
+impl Default for Background {
+    fn default() -> Self {
+        Self {
+            keep_running: true,
+            close_hint_shown: false,
         }
     }
 }
@@ -246,15 +319,23 @@ pub struct Fonts {
 pub struct Config {
     pub language: LanguageSetting,
     pub appearance: Appearance,
+    /// Size of the interface in percent, on top of the Windows display scaling.
+    pub interface_scale: u16,
     pub destination: PathBuf,
     pub mode: BackupMode,
     /// Exclude patterns (glob syntax) applied to file and folder names and to
     /// paths relative to the source, case-insensitive.
     pub exclude: Vec<String>,
     pub encryption: Encryption,
-    pub schedule: Schedule,
+    pub background: Background,
     pub advanced: Advanced,
     pub fonts: Fonts,
+    #[serde(
+        rename = "schedule",
+        deserialize_with = "schedules_compat",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub schedules: Vec<Schedule>,
     #[serde(rename = "source")]
     pub sources: Vec<Source>,
     /// Applications whose settings are backed up (see the catalog).
@@ -267,13 +348,15 @@ impl Default for Config {
         Self {
             language: LanguageSetting::Auto,
             appearance: Appearance::System,
+            interface_scale: 100,
             destination: PathBuf::new(),
             mode: BackupMode::Incremental,
             exclude: default_excludes(),
             encryption: Encryption::default(),
-            schedule: Schedule::default(),
+            background: Background::default(),
             advanced: Advanced::default(),
             fonts: Fonts::default(),
+            schedules: Vec::new(),
             sources: Vec::new(),
             apps: Vec::new(),
         }
@@ -344,6 +427,47 @@ impl Config {
         config
     }
 
+    /// Fills in what older or hand-edited files may lack (schedule ids).
+    pub fn normalize(&mut self) {
+        let mut seen = std::collections::HashSet::new();
+        for schedule in &mut self.schedules {
+            if schedule.id.trim().is_empty() || !seen.insert(schedule.id.clone()) {
+                schedule.id = Schedule::new_id();
+                seen.insert(schedule.id.clone());
+            }
+        }
+    }
+
+    pub fn any_schedule_enabled(&self) -> bool {
+        self.schedules.iter().any(|s| s.enabled)
+    }
+
+    /// The configuration as one schedule sees it: only its folders and, if
+    /// chosen, the application settings.
+    pub fn for_schedule(&self, schedule: &Schedule) -> Config {
+        let mut config = self.clone();
+        if !schedule.all_folders {
+            for source in &mut config.sources {
+                source.enabled = source.enabled
+                    && schedule
+                        .folders
+                        .iter()
+                        .any(|f| crate::engine::paths_equal(f, &source.path));
+            }
+        }
+        if !schedule.applications {
+            for app in &mut config.apps {
+                app.enabled = false;
+            }
+        }
+        config
+    }
+
+    /// `interface_scale` as egui zoom factor, limited to sensible values.
+    pub fn zoom_factor(&self) -> f32 {
+        f32::from(self.interface_scale.clamp(75, 200)) / 100.0
+    }
+
     pub fn app_enabled(&self, id: &str) -> bool {
         self.apps.iter().any(|a| a.id == id && a.enabled)
     }
@@ -410,6 +534,16 @@ const CONFIG_HEADER: &str = "\
 #   [[application]]
 #   id = \"firefox\"
 #   enabled = true
+#
+# Each [[schedule]] block is one automatic backup:
+#   [[schedule]]
+#   frequency = \"daily\"            # daily | weekly | hourly | at-start
+#   time = \"20:00\"
+#   weekday = \"sunday\"             # for weekly
+#   every_hours = 4                # for hourly
+#   all_folders = false            # optional: only the folders listed below
+#   folders = ['C:\\Users\\you\\Documents']
+#   applications = true
 ";
 
 /// Outcome of loading the configuration, used to show a quiet notice in the UI.
@@ -420,6 +554,7 @@ pub enum ConfigNotice {
     NotSaved { message: String },
 }
 
+#[derive(Clone)]
 pub struct Loaded {
     pub config: Config,
     pub notice: Option<ConfigNotice>,
@@ -428,11 +563,15 @@ pub struct Loaded {
 pub fn load_or_create(paths: &AppPaths) -> Loaded {
     let path = &paths.config_file;
     match std::fs::read_to_string(path) {
-        Ok(text) => match toml::from_str::<Config>(&text) {
-            Ok(config) => Loaded {
-                config,
-                notice: None,
-            },
+        // Older Notepad versions save UTF-8 with a byte order mark.
+        Ok(text) => match toml::from_str::<Config>(text.trim_start_matches('\u{feff}')) {
+            Ok(mut config) => {
+                config.normalize();
+                Loaded {
+                    config,
+                    notice: None,
+                }
+            }
             Err(err) => {
                 // Never overwrite a file the user may have edited: keep a copy.
                 let kept_copy = path.with_extension("invalid.toml");
@@ -487,6 +626,52 @@ mod tests {
         let text = config.to_toml().unwrap();
         let parsed: Config = toml::from_str(&text).unwrap();
         assert_eq!(parsed, config);
+    }
+
+    #[test]
+    fn schedules_roundtrip_and_old_single_schedule_is_read() {
+        let mut config = Config {
+            sources: vec![Source::new("Documents", r"C:\Users\a\Documents", true)],
+            schedules: vec![
+                Schedule::default(),
+                Schedule {
+                    frequency: Frequency::Hourly,
+                    all_folders: false,
+                    folders: vec![PathBuf::from(r"C:\Users\a\Documents")],
+                    applications: false,
+                    ..Schedule::default()
+                },
+            ],
+            ..Config::default()
+        };
+        config.normalize();
+        assert_ne!(config.schedules[0].id, config.schedules[1].id);
+        let text = config.to_toml().unwrap();
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert_eq!(parsed, config);
+
+        // AeternaVault 0.2 wrote one [schedule] table.
+        let old = "[schedule]\nenabled = true\nfrequency = \"at-logon\"\ntime = \"08:00\"\n";
+        let mut parsed: Config = toml::from_str(old).unwrap();
+        parsed.normalize();
+        assert_eq!(parsed.schedules.len(), 1);
+        assert_eq!(parsed.schedules[0].frequency, Frequency::AtStart);
+        assert!(!parsed.schedules[0].id.is_empty());
+        let off = "[schedule]\nenabled = false\n";
+        assert!(toml::from_str::<Config>(off).unwrap().schedules.is_empty());
+
+        // A schedule for one folder leaves the other folders and the apps out.
+        let mut two = config.clone();
+        two.sources
+            .push(Source::new("Music", r"C:\Users\a\Music", true));
+        two.apps.push(AppChoice {
+            id: "firefox".into(),
+            enabled: true,
+        });
+        let narrowed = two.for_schedule(&config.schedules[1]);
+        assert!(narrowed.sources[0].enabled);
+        assert!(!narrowed.sources[1].enabled);
+        assert!(!narrowed.apps[0].enabled);
     }
 
     #[test]

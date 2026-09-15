@@ -113,6 +113,36 @@ pub fn enter_background_mode() {
     }
 }
 
+/// Lowers the priority of the current thread only (automatic backups run on
+/// a thread of the window's process). Returns whether it worked.
+pub fn thread_background_begin() -> bool {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
+    };
+    // SAFETY: the current-thread handle is always valid.
+    unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) != 0 }
+}
+
+pub fn thread_background_end() {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_END,
+    };
+    // SAFETY: the current-thread handle is always valid.
+    unsafe {
+        SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
+    }
+}
+
+/// `true` if the computer runs on battery right now.
+pub fn on_battery() -> bool {
+    use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    // SAFETY: the struct is plain data, filled by the call.
+    unsafe {
+        let mut status: SYSTEM_POWER_STATUS = std::mem::zeroed();
+        GetSystemPowerStatus(&mut status) != 0 && status.ACLineStatus == 0
+    }
+}
+
 /// Lower-case executable names of all running processes (e.g. `firefox.exe`).
 pub fn running_processes() -> HashSet<String> {
     let mut names = HashSet::new();
@@ -141,6 +171,37 @@ pub fn running_processes() -> HashSet<String> {
         CloseHandle(snapshot);
     }
     names
+}
+
+pub fn work_area_points() -> Option<(f32, f32)> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsProcessDPIAware, SPI_GETWORKAREA, SystemParametersInfoW,
+    };
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: SPI_GETWORKAREA writes one RECT into the provided buffer.
+    let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, (&raw mut rect).cast(), 0) };
+    if ok == 0 {
+        return None;
+    }
+    let width = (rect.right - rect.left) as f32;
+    let height = (rect.bottom - rect.top) as f32;
+    // A DPI-unaware process already receives scaled (logical) values.
+    // SAFETY: plain queries without arguments.
+    let scale = unsafe {
+        if IsProcessDPIAware() != 0 {
+            GetDpiForSystem() as f32 / 96.0
+        } else {
+            1.0
+        }
+    };
+    (width > 0.0 && height > 0.0 && scale > 0.0).then(|| (width / scale, height / scale))
 }
 
 /// Encrypts data for the current Windows user (DPAPI). Only the same user on

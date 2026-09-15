@@ -8,12 +8,11 @@ use eframe::egui::{
 };
 
 use super::status_color;
-use crate::config::{BackupMode, Frequency, Weekday};
+use crate::config::BackupMode;
 use crate::engine::selection::{self, CheckState};
 use crate::gui::theme::{SANS_STRONG, palette};
 use crate::gui::widgets::{self, ButtonKind};
 use crate::gui::{AeternaApp, View};
-use crate::platform::scheduler;
 
 const TREE_ROW: f32 = 26.0;
 const TREE_LIMIT: usize = 400;
@@ -261,7 +260,8 @@ fn tree_panel(app: &mut AeternaApp, ui: &mut Ui, index: usize) {
             }
             egui::ScrollArea::vertical()
                 .id_salt(("tree", root.display().to_string()))
-                .max_height(300.0)
+                .max_height(320.0)
+                .min_scrolled_height(260.0)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     if render_dir(app, ui, index, &root, "", 0) {
@@ -534,12 +534,26 @@ fn destination_card(app: &mut AeternaApp, ui: &mut Ui) {
                 if widgets::button(ui, ButtonKind::Secondary, t.choose, !app.is_busy()).clicked()
                     && let Some(folder) = rfd::FileDialog::new().pick_folder()
                 {
-                    app.config.destination = folder;
+                    app.config.destination = crate::engine::snapshots::chosen_destination(
+                        &folder,
+                        app.config.advanced.destination_app_folder,
+                    );
                     app.mark_dirty();
                     app.destination_changed(&ctx);
                 }
             });
         });
+        if ui
+            .checkbox(
+                &mut app.config.advanced.destination_app_folder,
+                egui::RichText::new(t.destination_app_folder)
+                    .size(13.0)
+                    .color(p.text_secondary),
+            )
+            .changed()
+        {
+            app.mark_dirty();
+        }
         match app.destination_reachable() {
             Some(false) => {
                 ui.label(
@@ -601,118 +615,166 @@ fn schedule_card(app: &mut AeternaApp, ui: &mut Ui) {
     let p = *palette(ui);
 
     widgets::card(ui, |ui| {
-        let before = app.config.schedule.clone();
         ui.horizontal(|ui| {
             ui.vertical(|ui| widgets::section_title(ui, t.schedule_title));
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                let mut on = app.config.schedule.enabled;
-                if widgets::toggle(ui, &mut on, app.schedule.job.is_none(), t.schedule_title) {
-                    app.config.schedule.enabled = on;
-                }
-                if app.schedule.job.is_some() {
-                    ui.add(egui::Spinner::new().size(14.0));
+                if widgets::button(ui, ButtonKind::Secondary, t.add_schedule, true).clicked() {
+                    app.new_schedule();
                 }
             });
         });
         widgets::secondary_text(ui, t.schedule_hint);
+        ui.add_space(8.0);
 
-        if app.config.schedule.enabled {
-            ui.add_space(10.0);
-            let schedule = &mut app.config.schedule;
-            ui.horizontal_wrapped(|ui| {
-                let label = |f: Frequency| match f {
-                    Frequency::Daily => t.freq_daily,
-                    Frequency::Weekly => t.freq_weekly,
-                    Frequency::Hourly => t.freq_hourly,
-                    Frequency::AtLogon => t.freq_logon,
-                };
-                egui::ComboBox::from_id_salt("schedule-frequency")
-                    .selected_text(label(schedule.frequency))
-                    .width(190.0)
-                    .show_ui(ui, |ui| {
-                        for f in [
-                            Frequency::Daily,
-                            Frequency::Weekly,
-                            Frequency::Hourly,
-                            Frequency::AtLogon,
-                        ] {
-                            ui.selectable_value(&mut schedule.frequency, f, label(f));
-                        }
-                    });
-
-                if schedule.frequency == Frequency::Weekly {
-                    ui.label(t.on_day);
-                    egui::ComboBox::from_id_salt("schedule-weekday")
-                        .selected_text(t.weekdays[schedule.weekday as usize])
-                        .width(140.0)
-                        .show_ui(ui, |ui| {
-                            for day in Weekday::ALL {
-                                ui.selectable_value(
-                                    &mut schedule.weekday,
-                                    day,
-                                    t.weekdays[day as usize],
-                                );
-                            }
-                        });
-                }
-                if matches!(schedule.frequency, Frequency::Daily | Frequency::Weekly) {
-                    ui.label(t.at_time);
-                    egui::ComboBox::from_id_salt("schedule-time")
-                        .selected_text(schedule.time.clone())
-                        .width(90.0)
-                        .show_ui(ui, |ui| {
-                            for hour in 0..24 {
-                                for minute in [0, 30] {
-                                    let value = format!("{hour:02}:{minute:02}");
-                                    ui.selectable_value(&mut schedule.time, value.clone(), value);
-                                }
-                            }
-                        });
-                }
-                if schedule.frequency == Frequency::Hourly {
-                    egui::ComboBox::from_id_salt("schedule-hours")
-                        .selected_text(lang.every_hours(schedule.every_hours))
-                        .width(160.0)
-                        .show_ui(ui, |ui| {
-                            for hours in [1u8, 2, 3, 4, 6, 8, 12] {
-                                ui.selectable_value(
-                                    &mut schedule.every_hours,
-                                    hours,
-                                    lang.every_hours(hours),
-                                );
-                            }
-                        });
-                }
+        // A backup that runs right now in the background.
+        let running = app.background.as_ref().and_then(|b| b.service.running());
+        if let Some(running) = &running {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(14.0));
+                widgets::strong_text(ui, lang.running_automatic(&running.label));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if widgets::button(ui, ButtonKind::Quiet, t.stop, true).clicked()
+                        && let Some(background) = &app.background
+                    {
+                        background.service.cancel_running();
+                    }
+                });
             });
-            if schedule.frequency == Frequency::AtLogon {
-                widgets::secondary_text(ui, t.logon_hint);
-            }
-            ui.add_space(4.0);
-            ui.checkbox(&mut schedule.catch_up, t.catch_up);
-            ui.checkbox(&mut schedule.only_on_ac_power, t.only_ac);
+            widgets::progress_line(ui, running.progress.fraction());
+            ui.add_space(8.0);
+        }
 
-            ui.add_space(6.0);
-            if let Some(next) = scheduler::next_run(schedule, chrono::Local::now()) {
-                widgets::secondary_text(ui, lang.next_backup(next));
+        if app.config.schedules.is_empty() {
+            widgets::secondary_text(ui, t.schedules_empty);
+        }
+
+        let now = chrono::Local::now();
+        let mut toggled: Option<(String, bool)> = None;
+        let mut edit = None;
+        let mut remove = None;
+        let mut run_now = None;
+        let count = app.config.schedules.len();
+        for (index, schedule) in app.config.schedules.iter().enumerate() {
+            let label = crate::automatic::describe(schedule, &app.config, lang);
+            ui.horizontal(|ui| {
+                let mut on = schedule.enabled;
+                if widgets::toggle(ui, &mut on, true, &label) {
+                    toggled = Some((schedule.id.clone(), on));
+                }
+                ui.add_space(4.0);
+                let right_width = 250.0;
+                ui.allocate_ui_with_layout(
+                    egui::vec2((ui.available_width() - right_width).max(160.0), 40.0),
+                    Layout::top_down(Align::Min),
+                    |ui| {
+                        let color = if schedule.enabled {
+                            p.text
+                        } else {
+                            p.text_secondary
+                        };
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&label)
+                                    .family(FontFamily::Name(SANS_STRONG.into()))
+                                    .color(color),
+                            )
+                            .truncate(),
+                        );
+                        let state = app.state.schedules.get(&schedule.id);
+                        let mut details = Vec::new();
+                        if schedule.enabled
+                            && let Some(next) =
+                                crate::automatic::timing::next_occurrence(schedule, now)
+                        {
+                            details.push(lang.next_backup(next));
+                        }
+                        if let Some(run) = state.and_then(|s| s.last_run.as_ref()) {
+                            details.push(lang.schedule_last_run(run));
+                        }
+                        if !schedule.name.trim().is_empty() {
+                            details.insert(0, crate::automatic::when_text(schedule, lang));
+                        }
+                        let failed = state
+                            .and_then(|s| s.last_run.as_ref())
+                            .is_some_and(|r| !r.outcome.is_success());
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(details.join(" · "))
+                                    .size(12.5)
+                                    .color(if failed { p.warning } else { p.text_secondary }),
+                            )
+                            .truncate(),
+                        );
+                    },
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if widgets::button(ui, ButtonKind::Quiet, "×", true)
+                        .on_hover_text(t.remove_schedule)
+                        .clicked()
+                    {
+                        remove = Some(schedule.id.clone());
+                    }
+                    if widgets::button(ui, ButtonKind::Quiet, t.edit, true).clicked() {
+                        edit = Some(schedule.id.clone());
+                    }
+                    let can_run = app.background.is_some() && running.is_none() && !app.is_busy();
+                    if widgets::button(ui, ButtonKind::Quiet, t.run_now, can_run).clicked() {
+                        run_now = Some(schedule.id.clone());
+                    }
+                });
+            });
+            if index + 1 < count {
+                let y = ui.cursor().top() + 2.0;
+                let rect = ui.max_rect();
+                ui.painter().line_segment(
+                    [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+                    Stroke::new(1.0, p.border),
+                );
+                ui.add_space(5.0);
             }
-            if let Some(run) = &app.state.last_automatic {
-                let color = if matches!(
-                    run.outcome,
-                    crate::state::AutomaticOutcome::Complete
-                        | crate::state::AutomaticOutcome::CompleteWithNotes
-                ) {
-                    p.text_secondary
-                } else {
-                    p.warning
-                };
-                ui.label(
-                    egui::RichText::new(lang.last_automatic(run))
-                        .size(13.0)
-                        .color(color),
+        }
+        if let Some((id, on)) = toggled {
+            app.set_schedule_enabled(&id, on);
+        }
+        if let Some(id) = edit {
+            app.edit_schedule(&id);
+        }
+        if let Some(id) = remove {
+            app.remove_schedule(&id);
+        }
+        if let Some(id) = run_now {
+            app.run_schedule_now(&id);
+        }
+
+        if !app.config.schedules.is_empty() {
+            ui.add_space(10.0);
+            if let Some(autostart) = app.background.as_ref().map(|b| b.autostart) {
+                let mut on = autostart;
+                if ui.checkbox(&mut on, t.start_with_windows).changed() {
+                    app.set_autostart(on);
+                }
+            }
+            if ui
+                .checkbox(&mut app.config.background.keep_running, t.keep_running)
+                .changed()
+            {
+                app.mark_dirty();
+            }
+            let autostart = app.background.as_ref().is_some_and(|b| b.autostart);
+            if app.config.any_schedule_enabled()
+                && (!autostart || !app.config.background.keep_running)
+            {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(t.schedule_only_while_running)
+                            .size(12.5)
+                            .color(p.text_secondary),
+                    )
+                    .wrap(),
                 );
             }
 
-            if app.config.encryption.enabled && !app.vault.remembered {
+            if app.config.encryption.enabled && !app.vault.remembered && app.vault.key.is_none() {
                 ui.add_space(6.0);
                 ui.horizontal_wrapped(|ui| {
                     ui.label(egui::RichText::new(t.schedule_needs_key).color(p.warning));
@@ -722,13 +784,8 @@ fn schedule_card(app: &mut AeternaApp, ui: &mut Ui) {
                 });
             }
         }
-
-        if app.config.schedule != before {
-            app.mark_dirty();
-        }
     });
 }
-
 fn indented_hint(ui: &mut Ui, text: &str) {
     ui.horizontal(|ui| {
         ui.add_space(26.0);

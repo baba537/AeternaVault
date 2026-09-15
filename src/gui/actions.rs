@@ -11,6 +11,7 @@ use super::widgets::NoticeKind;
 use super::{
     AeternaApp, AfterUnlock, AppStatus, Done, Pending, Screen, TreeEntry, VaultDialog, View,
 };
+use crate::config::Schedule;
 use crate::config::Source;
 use crate::engine::crypto::passphrase_strength;
 use crate::engine::plan::{
@@ -24,7 +25,7 @@ use crate::engine::{backup, paths_equal, scan, vault};
 use crate::error::EngineError;
 use crate::i18n::Lang;
 use crate::platform::known_paths::KnownPaths;
-use crate::platform::{self, scheduler, vss::LiveFiles};
+use crate::platform::{self, vss::LiveFiles};
 use crate::state;
 
 pub const MIN_PASSPHRASE_CHARS: usize = 10;
@@ -330,34 +331,6 @@ impl AeternaApp {
             }
         }
 
-        if let Some(job) = &self.schedule.job {
-            let (mut values, finished) = job.drain();
-            if let Some((schedule, result)) = values.pop() {
-                match result {
-                    Ok(()) => {
-                        self.state.task_executable = schedule
-                            .enabled
-                            .then(|| std::env::current_exe().ok())
-                            .flatten();
-                        self.state.save(&self.paths.config_file);
-                        self.schedule.applied = Some(schedule);
-                    }
-                    Err(message) => {
-                        tracing::error!("schedule could not be applied: {message}");
-                        self.notify(NoticeKind::Error, self.lang.schedule_error(&message));
-                        if schedule.enabled {
-                            self.config.schedule.enabled = false;
-                            self.mark_dirty();
-                        }
-                        self.schedule.applied = Some(self.config.schedule.clone());
-                    }
-                }
-            }
-            if finished {
-                self.schedule.job = None;
-            }
-        }
-
         if let Some(task) = &mut self.task
             && let Some(result) = task.poll()
         {
@@ -605,6 +578,7 @@ impl AeternaApp {
         self.catalog = platform::apps::Catalog::load(&config_dir);
         super::theme::install_fonts(ctx, &self.config.fonts);
         super::theme::apply(ctx, self.config.appearance);
+        ctx.set_zoom_factor(self.config.zoom_factor());
         self.sizes.clear();
         self.tree.listings.clear();
         self.destination_changed(ctx);
@@ -642,7 +616,7 @@ impl AeternaApp {
     pub fn open_unlock(&mut self, then: AfterUnlock) {
         self.vault.dialog = Some(VaultDialog::Unlock {
             secret: String::new(),
-            remember: then == AfterUnlock::Remember || self.config.schedule.enabled,
+            remember: then == AfterUnlock::Remember || self.config.any_schedule_enabled(),
             error: None,
             then,
         });
@@ -786,41 +760,91 @@ impl AeternaApp {
 
     // --- automatic backups ---------------------------------------------------------------
 
-    pub(super) fn check_schedule_on_start(&mut self, _ctx: &egui::Context) {
-        if !self.config.schedule.enabled {
-            // Nothing to do; turning it off later removes the task.
-            self.schedule.applied = Some(self.config.schedule.clone());
-            return;
-        }
-        let exe = std::env::current_exe().ok();
-        let up_to_date = self.state.task_executable.is_some()
-            && self.state.task_executable == exe
-            && scheduler::is_installed();
-        self.schedule.applied = up_to_date.then(|| self.config.schedule.clone());
+    pub fn new_schedule(&mut self) {
+        self.schedule.editor = Some(super::ScheduleEditor {
+            schedule: Schedule {
+                id: Schedule::new_id(),
+                ..Schedule::default()
+            },
+            is_new: true,
+        });
     }
 
-    /// Installs or removes the scheduled task when the settings changed.
-    pub(super) fn apply_schedule(&mut self, ctx: &egui::Context) {
-        if self.schedule.job.is_some()
-            || self.schedule.applied.as_ref() == Some(&self.config.schedule)
+    pub fn edit_schedule(&mut self, id: &str) {
+        if let Some(schedule) = self.config.schedules.iter().find(|s| s.id == id) {
+            self.schedule.editor = Some(super::ScheduleEditor {
+                schedule: schedule.clone(),
+                is_new: false,
+            });
+        }
+    }
+
+    /// Stores a schedule from the dialog.
+    pub fn save_schedule(&mut self, schedule: Schedule) {
+        let was_enabled = self
+            .config
+            .schedules
+            .iter()
+            .find(|s| s.id == schedule.id)
+            .map(|s| s.enabled);
+        match self
+            .config
+            .schedules
+            .iter_mut()
+            .find(|s| s.id == schedule.id)
         {
+            Some(existing) => *existing = schedule.clone(),
+            None => self.config.schedules.push(schedule.clone()),
+        }
+        if schedule.enabled && was_enabled != Some(true) {
+            self.arm_schedule(&schedule.id);
+        }
+        tracing::info!("automatic backup saved: {:?}", schedule.frequency);
+        self.mark_dirty();
+    }
+
+    pub fn set_schedule_enabled(&mut self, id: &str, enabled: bool) {
+        let Some(schedule) = self.config.schedules.iter_mut().find(|s| s.id == id) else {
+            return;
+        };
+        if schedule.enabled == enabled {
             return;
         }
-        let schedule = self.config.schedule.clone();
-        let work_dir = self
-            .paths
-            .config_file
-            .parent()
-            .map(PathBuf::from)
-            .unwrap_or_default();
-        self.schedule.job = Some(Job::spawn(ctx, move |_, send| {
-            let result = if schedule.enabled {
-                std::env::current_exe()
-                    .and_then(|exe| scheduler::install(&schedule, &exe, &work_dir))
-            } else {
-                scheduler::remove()
-            };
-            send((schedule, result.map_err(|e| e.to_string())));
-        }));
+        schedule.enabled = enabled;
+        if enabled {
+            self.arm_schedule(id);
+        }
+        self.mark_dirty();
+    }
+
+    pub fn remove_schedule(&mut self, id: &str) {
+        self.config.schedules.retain(|s| s.id != id);
+        state::State::update(&self.paths.config_file, |state| {
+            state.schedules.remove(id);
+        });
+        self.mark_dirty();
+    }
+
+    fn arm_schedule(&mut self, id: &str) {
+        match &self.background {
+            Some(background) => background.service.arm(id),
+            None => {
+                let id = id.to_string();
+                state::State::update(&self.paths.config_file, |state| {
+                    state.schedules.entry(id).or_default().armed_at = Some(chrono::Utc::now());
+                });
+            }
+        }
+    }
+
+    pub fn run_schedule_now(&mut self, id: &str) {
+        if self.background.is_none() {
+            return;
+        }
+        // The service works with the configuration it was given last.
+        self.save_now();
+        if let Some(background) = &self.background {
+            background.service.run_schedule_now(id);
+        }
     }
 }

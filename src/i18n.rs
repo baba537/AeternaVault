@@ -478,10 +478,48 @@ impl Lang {
         (ok, text)
     }
 
-    pub fn last_automatic(self, run: &crate::state::AutomaticRun) -> String {
-        use crate::state::AutomaticOutcome as O;
+    pub fn registry_applied(self, n: u64) -> String {
+        match (self, n) {
+            (Lang::En, 1) => "1 registry key was applied.".to_string(),
+            (Lang::En, n) => format!("{n} registry keys were applied."),
+            (Lang::De, 1) => "1 Registry-Schlüssel wurde übernommen.".to_string(),
+            (Lang::De, n) => format!("{n} Registry-Schlüssel wurden übernommen."),
+        }
+    }
+
+    pub fn autostart_error(self, message: &str) -> String {
+        match self {
+            Lang::En => format!("Starting with Windows could not be changed: {message}"),
+            Lang::De => format!("Der Start mit Windows konnte nicht geändert werden: {message}"),
+        }
+    }
+
+    pub fn every_hours_capital(self, hours: u8) -> String {
+        match self {
+            Lang::En => format!("Every {hours} hours"),
+            Lang::De => format!("Alle {hours} Stunden"),
+        }
+    }
+
+    pub fn running_automatic(self, label: &str) -> String {
+        match self {
+            Lang::En => format!("Automatic backup running: {label}"),
+            Lang::De => format!("Automatische Sicherung läuft: {label}"),
+        }
+    }
+
+    pub fn schedule_last_run(self, run: &crate::state::AutomaticRun) -> String {
         let when = self.relative_time(run.at.with_timezone(&Local));
-        let status = match (self, run.outcome) {
+        let status = self.outcome_word(run.outcome);
+        match self {
+            Lang::En => format!("last: {when}, {status}"),
+            Lang::De => format!("zuletzt: {when}, {status}"),
+        }
+    }
+
+    fn outcome_word(self, outcome: crate::state::AutomaticOutcome) -> &'static str {
+        use crate::state::AutomaticOutcome as O;
+        match (self, outcome) {
             (Lang::En, O::Complete) => "completed",
             (Lang::De, O::Complete) => "abgeschlossen",
             (Lang::En, O::CompleteWithNotes) => "completed with notes",
@@ -494,29 +532,62 @@ impl Lang {
             (Lang::De, O::AlreadyRunning) => "übersprungen",
             (Lang::En, O::Failed) => "not completed",
             (Lang::De, O::Failed) => "nicht abgeschlossen",
-        };
+        }
+    }
+
+    pub fn tray_running(self, label: &str, fraction: Option<f32>) -> String {
+        let percent = fraction
+            .map(|f| format!(" – {} %", (f * 100.0).round() as u32))
+            .unwrap_or_default();
         match self {
-            Lang::En => format!("Last automatic backup: {when} — {status}"),
-            Lang::De => format!("Letzte automatische Sicherung: {when} — {status}"),
+            Lang::En => format!("AeternaVault – backing up{percent}\n{label}"),
+            Lang::De => format!("AeternaVault – Sicherung läuft{percent}\n{label}"),
         }
     }
 
-    pub fn registry_applied(self, n: u64) -> String {
-        match (self, n) {
-            (Lang::En, 1) => "1 registry key was applied.".to_string(),
-            (Lang::En, n) => format!("{n} registry keys were applied."),
-            (Lang::De, 1) => "1 Registry-Schlüssel wurde übernommen.".to_string(),
-            (Lang::De, n) => format!("{n} Registry-Schlüssel wurden übernommen."),
+    pub fn tray_idle(self, next: Option<DateTime<Local>>) -> String {
+        match (self, next) {
+            (Lang::En, Some(next)) => {
+                format!("AeternaVault\nNext backup: {}", self.upcoming_time(next))
+            }
+            (Lang::De, Some(next)) => {
+                format!(
+                    "AeternaVault\nNächste Sicherung: {}",
+                    self.upcoming_time(next)
+                )
+            }
+            (_, None) => "AeternaVault".to_string(),
         }
     }
-
-    pub fn schedule_error(self, message: &str) -> String {
+    /// Content of the text file offered in the recovery key dialog.
+    pub fn recovery_file_text(self, key: &str, vault_id: &str, destination: &str) -> String {
+        let date = Local::now().format("%Y-%m-%d");
         match self {
             Lang::En => format!(
-                "The automatic backup could not be set up in the Windows Task Scheduler: {message}"
+                "AeternaVault — recovery key\n\
+                 ===========================\n\n\
+                 Recovery key:  {key}\n\n\
+                 Vault:         {vault_id}\n\
+                 Destination:   {destination}\n\
+                 Created:       {date}\n\n\
+                 This key unlocks the encrypted backups if the passphrase is forgotten.\n\
+                 Anyone who has it can read the backups. Keep this file (or a printout)\n\
+                 in a safe place, separate from the backups.\n\n\
+                 Upper/lower case, spaces and dashes do not matter when typing it.\n"
             ),
             Lang::De => format!(
-                "Die automatische Sicherung konnte nicht in der Windows-Aufgabenplanung eingerichtet werden: {message}"
+                "AeternaVault — Wiederherstellungsschlüssel\n\
+                 ==========================================\n\n\
+                 Wiederherstellungsschlüssel:  {key}\n\n\
+                 Tresor:                       {vault_id}\n\
+                 Ziel:                         {destination}\n\
+                 Erstellt:                     {date}\n\n\
+                 Dieser Schlüssel entsperrt die verschlüsselten Sicherungen, falls die\n\
+                 Passphrase vergessen wurde. Wer ihn hat, kann die Sicherungen lesen.\n\
+                 Bewahre diese Datei (oder einen Ausdruck) sicher und getrennt von den\n\
+                 Sicherungen auf.\n\n\
+                 Groß-/Kleinschreibung, Leerzeichen und Bindestriche spielen beim Eintippen\n\
+                 keine Rolle.\n"
             ),
         }
     }
@@ -877,13 +948,13 @@ pub struct Tr {
     pub freq_daily: &'static str,
     pub freq_weekly: &'static str,
     pub freq_hourly: &'static str,
-    pub freq_logon: &'static str,
+    pub freq_at_start: &'static str,
     pub at_time: &'static str,
     pub on_day: &'static str,
     pub weekdays: [&'static str; 7],
     pub catch_up: &'static str,
     pub only_ac: &'static str,
-    pub logon_hint: &'static str,
+    pub at_start_hint: &'static str,
     pub schedule_needs_key: &'static str,
     pub remember_now: &'static str,
 
@@ -894,6 +965,46 @@ pub struct Tr {
     pub open_program_list: &'static str,
     pub adv_program_list: &'static str,
     pub selected_backup_locked: &'static str,
+
+    // --- 0.3: dialogs, destination, display --------------------------------------
+    pub show_secret: &'static str,
+    pub hide_secret: &'static str,
+    pub copied: &'static str,
+    pub save_as_file: &'static str,
+    pub recovery_file_name: &'static str,
+    pub recovery_file_saved: &'static str,
+    pub destination_app_folder: &'static str,
+    pub interface_size: &'static str,
+    pub adv_compatibility_graphics: &'static str,
+    pub adv_compatibility_hint: &'static str,
+
+    // --- 0.3: automatic backups run by AeternaVault --------------------------------
+    pub weekdays_every: [&'static str; 7],
+    pub scope_everything: &'static str,
+    pub scope_all_folders: &'static str,
+    pub scope_nothing: &'static str,
+    pub schedules_empty: &'static str,
+    pub add_schedule: &'static str,
+    pub edit: &'static str,
+    pub run_now: &'static str,
+    pub remove_schedule: &'static str,
+    pub stop: &'static str,
+    pub start_with_windows: &'static str,
+    pub keep_running: &'static str,
+    pub schedule_only_while_running: &'static str,
+    pub schedule_new_title: &'static str,
+    pub schedule_edit_title: &'static str,
+    pub schedule_when: &'static str,
+    pub schedule_what: &'static str,
+    pub schedule_name: &'static str,
+    pub scope_radio_everything: &'static str,
+    pub scope_radio_only: &'static str,
+    pub starting_at: &'static str,
+    pub tray_open: &'static str,
+    pub tray_quit: &'static str,
+    pub close_hint_title: &'static str,
+    pub close_hint_text: &'static str,
+    pub legacy_task_removed: &'static str,
 }
 
 pub static EN: Tr = Tr {
@@ -1114,11 +1225,11 @@ pub static EN: Tr = Tr {
     locked_backup: "Encrypted — unlock to see the details",
 
     schedule_title: "Automatic backups",
-    schedule_hint: "Backups run quietly in the background, without a window. Missed backups are made up as soon as the computer is on again.",
+    schedule_hint: "AeternaVault runs these backups itself, quietly and with low priority, while it is open or waiting in the notification area. Missed backups are made up.",
     freq_daily: "Every day",
     freq_weekly: "Every week",
     freq_hourly: "Every few hours",
-    freq_logon: "When I sign in",
+    freq_at_start: "When AeternaVault starts",
     at_time: "at",
     on_day: "on",
     weekdays: [
@@ -1132,8 +1243,8 @@ pub static EN: Tr = Tr {
     ],
     catch_up: "Make up missed backups",
     only_ac: "Only when plugged in (laptops)",
-    logon_hint: "About five minutes after signing in to Windows.",
-    schedule_needs_key: "Encrypted automatic backups need the passphrase to be remembered on this computer.",
+    at_start_hint: "A few minutes after AeternaVault starts — with “Start with Windows” that is shortly after signing in.",
+    schedule_needs_key: "Encrypted automatic backups need the key: remember it on this computer, or unlock the backups while AeternaVault runs.",
     remember_now: "Remember…",
 
     restore_what_title: "What to restore",
@@ -1142,6 +1253,52 @@ pub static EN: Tr = Tr {
     open_program_list: "Open list of installed programs",
     adv_program_list: "Save a list of installed programs with every backup",
     selected_backup_locked: "Locked",
+
+    show_secret: "Show passphrase",
+    hide_secret: "Hide passphrase",
+    copied: "Copied to the clipboard",
+    save_as_file: "Save as text file…",
+    recovery_file_name: "AeternaVault recovery key.txt",
+    recovery_file_saved: "The recovery key was saved. Keep the file away from the backups — for example printed, or on a USB stick in a drawer.",
+    destination_app_folder: "Create a folder named “AeternaVault” inside the chosen folder",
+    interface_size: "Interface size",
+    adv_compatibility_graphics: "Compatibility graphics (OpenGL)",
+    adv_compatibility_hint: "Try this if the window looks distorted or flickers. Takes effect at the next start.",
+
+    weekdays_every: [
+        "Every Monday",
+        "Every Tuesday",
+        "Every Wednesday",
+        "Every Thursday",
+        "Every Friday",
+        "Every Saturday",
+        "Every Sunday",
+    ],
+    scope_everything: "everything that is ticked",
+    scope_all_folders: "all ticked folders",
+    scope_nothing: "Nothing is selected for this backup.",
+    schedules_empty: "No automatic backups yet.",
+    add_schedule: "Add…",
+    edit: "Edit…",
+    run_now: "Run now",
+    remove_schedule: "Remove this automatic backup",
+    stop: "Stop",
+    start_with_windows: "Start AeternaVault quietly when I sign in to Windows",
+    keep_running: "Keep running in the notification area when the window is closed",
+    schedule_only_while_running: "Automatic backups only run while AeternaVault is running. With both options above they also continue after closing the window and after a restart.",
+    schedule_new_title: "New automatic backup",
+    schedule_edit_title: "Automatic backup",
+    schedule_when: "When",
+    schedule_what: "What",
+    schedule_name: "Name (optional)",
+    scope_radio_everything: "All folders ticked under “What is kept safe”",
+    scope_radio_only: "Only these folders:",
+    starting_at: "starting at",
+    tray_open: "Open AeternaVault",
+    tray_quit: "Quit AeternaVault",
+    close_hint_title: "AeternaVault keeps running",
+    close_hint_text: "Automatic backups continue in the background. To quit, right-click this icon.",
+    legacy_task_removed: "Automatic backups are now run by AeternaVault itself. The Windows task of the previous version was removed, and AeternaVault now starts quietly with Windows.",
 };
 
 pub static DE: Tr = Tr {
@@ -1362,11 +1519,11 @@ pub static DE: Tr = Tr {
     locked_backup: "Verschlüsselt – entsperren, um Details zu sehen",
 
     schedule_title: "Automatische Sicherungen",
-    schedule_hint: "Sicherungen laufen leise im Hintergrund, ohne Fenster. Verpasste Sicherungen werden nachgeholt, sobald der Computer wieder an ist.",
+    schedule_hint: "AeternaVault führt diese Sicherungen selbst aus – leise und mit niedriger Priorität, solange es geöffnet ist oder im Infobereich wartet. Verpasste Sicherungen werden nachgeholt.",
     freq_daily: "Jeden Tag",
     freq_weekly: "Jede Woche",
     freq_hourly: "Alle paar Stunden",
-    freq_logon: "Bei jeder Anmeldung",
+    freq_at_start: "Beim Start von AeternaVault",
     at_time: "um",
     on_day: "am",
     weekdays: [
@@ -1380,8 +1537,8 @@ pub static DE: Tr = Tr {
     ],
     catch_up: "Verpasste Sicherungen nachholen",
     only_ac: "Nur mit Netzteil (Laptops)",
-    logon_hint: "Etwa fünf Minuten nach der Anmeldung bei Windows.",
-    schedule_needs_key: "Verschlüsselte automatische Sicherungen brauchen die auf diesem Computer gemerkte Passphrase.",
+    at_start_hint: "Einige Minuten nach dem Start von AeternaVault – mit „AeternaVault bei der Anmeldung starten“ also kurz nach der Anmeldung.",
+    schedule_needs_key: "Verschlüsselte automatische Sicherungen brauchen den Schlüssel: auf diesem Computer merken oder die Sicherungen entsperren, solange AeternaVault läuft.",
     remember_now: "Merken…",
 
     restore_what_title: "Was wiederhergestellt wird",
@@ -1390,6 +1547,52 @@ pub static DE: Tr = Tr {
     open_program_list: "Liste der installierten Programme öffnen",
     adv_program_list: "Mit jeder Sicherung eine Liste der installierten Programme speichern",
     selected_backup_locked: "Gesperrt",
+
+    show_secret: "Passphrase anzeigen",
+    hide_secret: "Passphrase verbergen",
+    copied: "In die Zwischenablage kopiert",
+    save_as_file: "Als Textdatei speichern…",
+    recovery_file_name: "AeternaVault Wiederherstellungsschlüssel.txt",
+    recovery_file_saved: "Der Wiederherstellungsschlüssel wurde gespeichert. Bewahre die Datei getrennt von den Sicherungen auf – zum Beispiel ausgedruckt oder auf einem USB-Stick in der Schublade.",
+    destination_app_folder: "Im gewählten Ordner einen Ordner „AeternaVault“ anlegen",
+    interface_size: "Größe der Oberfläche",
+    adv_compatibility_graphics: "Kompatible Grafik (OpenGL)",
+    adv_compatibility_hint: "Hilft, wenn das Fenster verzerrt aussieht oder flackert. Wirkt beim nächsten Start.",
+
+    weekdays_every: [
+        "Jeden Montag",
+        "Jeden Dienstag",
+        "Jeden Mittwoch",
+        "Jeden Donnerstag",
+        "Jeden Freitag",
+        "Jeden Samstag",
+        "Jeden Sonntag",
+    ],
+    scope_everything: "alles Ausgewählte",
+    scope_all_folders: "alle ausgewählten Ordner",
+    scope_nothing: "Für diese Sicherung ist nichts ausgewählt.",
+    schedules_empty: "Noch keine automatischen Sicherungen.",
+    add_schedule: "Hinzufügen…",
+    edit: "Bearbeiten…",
+    run_now: "Jetzt ausführen",
+    remove_schedule: "Diese automatische Sicherung entfernen",
+    stop: "Anhalten",
+    start_with_windows: "AeternaVault bei der Anmeldung an Windows leise starten",
+    keep_running: "Beim Schließen des Fensters im Infobereich weiterlaufen",
+    schedule_only_while_running: "Automatische Sicherungen laufen nur, solange AeternaVault läuft. Mit beiden Optionen oben laufen sie auch nach dem Schließen des Fensters und nach einem Neustart weiter.",
+    schedule_new_title: "Neue automatische Sicherung",
+    schedule_edit_title: "Automatische Sicherung",
+    schedule_when: "Wann",
+    schedule_what: "Was",
+    schedule_name: "Name (optional)",
+    scope_radio_everything: "Alle unter „Was bewahrt wird“ ausgewählten Ordner",
+    scope_radio_only: "Nur diese Ordner:",
+    starting_at: "ab",
+    tray_open: "AeternaVault öffnen",
+    tray_quit: "AeternaVault beenden",
+    close_hint_title: "AeternaVault läuft weiter",
+    close_hint_text: "Automatische Sicherungen laufen im Hintergrund weiter. Zum Beenden mit der rechten Maustaste auf dieses Symbol klicken.",
+    legacy_task_removed: "Automatische Sicherungen führt AeternaVault jetzt selbst aus. Die Windows-Aufgabe der vorigen Version wurde entfernt, und AeternaVault startet nun leise mit Windows.",
 };
 
 #[cfg(test)]

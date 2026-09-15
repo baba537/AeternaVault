@@ -60,6 +60,28 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                     }
                 });
                 ui.end_row();
+
+                widgets::secondary_text(ui, t.interface_size);
+                ui.horizontal(|ui| {
+                    let before = app.config.interface_scale;
+                    egui::ComboBox::from_id_salt("interface-scale")
+                        .selected_text(format!("{} %", app.config.interface_scale))
+                        .width(100.0)
+                        .show_ui(ui, |ui| {
+                            for scale in [90u16, 100, 110, 125, 150] {
+                                ui.selectable_value(
+                                    &mut app.config.interface_scale,
+                                    scale,
+                                    format!("{scale} %"),
+                                );
+                            }
+                        });
+                    if before != app.config.interface_scale {
+                        ctx.set_zoom_factor(app.config.zoom_factor());
+                        app.mark_dirty();
+                    }
+                });
+                ui.end_row();
             });
     });
 
@@ -180,6 +202,14 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
             &mut app.config.advanced.save_program_list,
             t.adv_program_list,
         );
+        ui.checkbox(
+            &mut app.config.advanced.compatibility_graphics,
+            t.adv_compatibility_graphics,
+        );
+        ui.horizontal(|ui| {
+            ui.add_space(26.0);
+            widgets::secondary_text(ui, t.adv_compatibility_hint);
+        });
         if before != app.config.advanced {
             app.mark_dirty();
         }

@@ -3,9 +3,12 @@
 //! simple fallbacks so the code base can grow in that direction later.
 
 pub mod apps;
+pub mod autostart;
+pub mod instance;
 pub mod known_paths;
 pub mod registry;
 pub mod scheduler;
+pub mod tray;
 pub mod vss;
 
 use std::collections::HashSet;
@@ -13,6 +16,47 @@ use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
 mod windows;
+
+/// Lower priority for the current thread while the guard lives.
+pub struct BackgroundThread {
+    #[cfg(windows)]
+    active: bool,
+}
+
+impl BackgroundThread {
+    pub fn enter() -> Self {
+        Self {
+            #[cfg(windows)]
+            active: windows::thread_background_begin(),
+        }
+    }
+}
+
+impl Drop for BackgroundThread {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if self.active {
+            windows::thread_background_end();
+        }
+    }
+}
+
+/// `true` if the computer runs on battery power right now.
+pub fn on_battery() -> bool {
+    #[cfg(windows)]
+    {
+        windows::on_battery()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// Demo and test runs must not change anything outside their folders.
+pub fn system_changes_allowed() -> bool {
+    !cfg!(test) && known_paths::profile_override().is_none()
+}
 
 /// Marks a folder as hidden. Failures are ignored: hiding is cosmetic.
 pub fn set_hidden(path: &Path) {
@@ -72,6 +116,19 @@ pub fn unprotect_for_user(data: &[u8]) -> std::io::Result<Vec<u8>> {
 pub fn attach_parent_console() {
     #[cfg(windows)]
     windows::attach_parent_console();
+}
+
+/// Size of the primary screen's work area (without the taskbar) in logical
+/// points, i.e. already divided by the display scaling.
+pub fn work_area_points() -> Option<(f32, f32)> {
+    #[cfg(windows)]
+    {
+        windows::work_area_points()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }
 
 /// Show a last-resort error message when the window cannot be created.

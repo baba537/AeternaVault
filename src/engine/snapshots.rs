@@ -101,6 +101,51 @@ pub fn destination_reachable(destination: &Path) -> bool {
         .any(|p| !p.as_os_str().is_empty() && p.exists())
 }
 
+/// Name of the folder created inside a freshly chosen destination.
+pub const APP_FOLDER: &str = "AeternaVault";
+
+/// The destination to use for a folder the user picked. With `app_folder`,
+/// backups go into an `AeternaVault` sub-folder — unless the picked folder is
+/// already such a folder or already contains backups.
+pub fn chosen_destination(picked: &Path, app_folder: bool) -> PathBuf {
+    if !app_folder || contains_backups(picked) {
+        return picked.to_path_buf();
+    }
+    let already_named = picked
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(APP_FOLDER));
+    if already_named {
+        picked.to_path_buf()
+    } else {
+        picked.join(APP_FOLDER)
+    }
+}
+
+/// Whether `folder` holds AeternaVault backups of any format.
+pub fn contains_backups(folder: &Path) -> bool {
+    if vault::exists(folder) {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if looks_like_snapshot_id(&name) {
+            return path.join(META_DIR).is_dir();
+        }
+        // Format 1: <COMPUTER>\<id>\snapshot.json
+        path.is_dir()
+            && std::fs::read_dir(&path).is_ok_and(|children| {
+                children.flatten().any(|c| {
+                    looks_like_snapshot_id(&c.file_name().to_string_lossy())
+                        && c.path().join(HEADER_FILE).is_file()
+                })
+            })
+    })
+}
+
 /// All snapshots below `destination`, newest first. Encrypted snapshots are
 /// only described in detail when `key` unlocks them.
 pub fn list(destination: &Path, key: Option<&VaultKey>) -> EngineResult<Vec<SnapshotInfo>> {

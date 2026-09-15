@@ -295,6 +295,33 @@ fn set_up_encryption_and_back_up_encrypted() {
     );
 }
 
+fn demo_schedules(config: &Config) -> Vec<crate::config::Schedule> {
+    use crate::config::{Frequency, Schedule};
+    let mut documents = Schedule {
+        id: "demo2".into(),
+        frequency: Frequency::Hourly,
+        every_hours: 2,
+        time: "08:00".into(),
+        all_folders: false,
+        applications: false,
+        ..Schedule::default()
+    };
+    documents.folders = config
+        .sources
+        .iter()
+        .filter(|s| s.enabled)
+        .take(1)
+        .map(|s| s.path.clone())
+        .collect();
+    vec![
+        Schedule {
+            id: "demo1".into(),
+            ..Schedule::default()
+        },
+        documents,
+    ]
+}
+
 /// Renders the README screenshots from a prepared demo configuration.
 ///
 /// ```text
@@ -329,10 +356,8 @@ fn render_readme_screenshots() {
             .build_eframe(move |cc| {
                 super::theme::install_fonts(&cc.egui_ctx, &crate::config::Fonts::default());
                 super::theme::apply(&cc.egui_ctx, appearance);
-                let mut app = AeternaApp::new(&cc.egui_ctx, paths, loaded, LogBuffer::default());
-                // Never touch the real Task Scheduler while taking pictures.
-                app.schedule.applied = Some(app.config.schedule.clone());
-                app
+                // No background service or tray icon while taking pictures.
+                AeternaApp::new(&cc.egui_ctx, paths, loaded, LogBuffer::default())
             });
         harness.step();
         harness
@@ -362,7 +387,9 @@ fn render_readme_screenshots() {
     let mut h = build(1800.0, &|config| {
         config.language = LanguageSetting::En;
         config.appearance = crate::config::Appearance::Dark;
-        config.schedule.enabled = true;
+        if config.schedules.is_empty() {
+            config.schedules = demo_schedules(config);
+        }
     });
     settle(&mut h);
     click(&mut h, "Choose what to keep from this folder: Desktop");

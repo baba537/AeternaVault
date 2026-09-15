@@ -227,9 +227,12 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
             })
             .collect();
 
+        // Inside the page's own scroll area the remaining height can be tiny
+        // (the catalog above is long), so the list gets a fixed minimum.
         egui::ScrollArea::vertical()
             .id_salt("installed-apps")
-            .max_height(320.0)
+            .max_height(440.0)
+            .min_scrolled_height(440.0)
             .auto_shrink([false, true])
             .show_rows(ui, 40.0, visible.len(), |ui, range| {
                 for installed_app in &visible[range] {

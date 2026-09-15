@@ -252,6 +252,49 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, enabled: bool, label: &str) -> bool {
     false
 }
 
+/// Small eye symbol next to password fields; crossed out while the text is hidden.
+pub fn eye_button(ui: &mut Ui, visible: bool, label: &str) -> Response {
+    let p = *palette(ui);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(34.0, 28.0), Sense::click());
+    let hovered = response.hovered();
+    if hovered {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(4), p.raised);
+    }
+    let color = if hovered || visible {
+        p.text
+    } else {
+        p.text_secondary
+    };
+    let stroke = Stroke::new(1.3, color);
+    let c = rect.center();
+    let (w, h) = (8.5, 5.0);
+    // Almond outline from two arcs.
+    let arc = |sign: f32| -> Vec<Pos2> {
+        (0..=16)
+            .map(|i| {
+                let x = -w + 2.0 * w * i as f32 / 16.0;
+                let y = sign * h * (1.0 - (x / w).powi(2));
+                c + egui::vec2(x, y)
+            })
+            .collect()
+    };
+    let painter = ui.painter();
+    painter.add(egui::Shape::line(arc(1.0), stroke));
+    painter.add(egui::Shape::line(arc(-1.0), stroke));
+    painter.circle_stroke(c, 2.4, stroke);
+    if !visible {
+        painter.line_segment(
+            [c + egui::vec2(-7.0, 6.0), c + egui::vec2(7.0, -6.0)],
+            stroke,
+        );
+    }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    response
+        .on_hover_text(label)
+        .on_hover_cursor(CursorIcon::PointingHand)
+}
+
 pub fn status_dot(ui: &mut Ui, color: Color32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 16.0), Sense::hover());
     ui.painter().circle_filled(rect.center(), 4.0, color);

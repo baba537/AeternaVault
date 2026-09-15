@@ -10,6 +10,7 @@
 //! * `views/` — one module per screen
 
 mod actions;
+mod background;
 mod dialogs;
 mod tasks;
 #[cfg(test)]
@@ -37,16 +38,59 @@ use crate::logging::LogBuffer;
 use crate::paths::AppPaths;
 use crate::platform::{self, apps};
 use crate::state::State;
+use background::Background;
 use tasks::{Job, Task};
 use theme::palette;
 use widgets::{ButtonKind, NoticeKind};
 
-pub fn run(paths: AppPaths, loaded: Loaded, log: LogBuffer) -> anyhow::Result<()> {
+/// How the window starts.
+#[derive(Debug, Clone)]
+pub struct StartOptions {
+    /// Start in the notification area without showing the window.
+    pub hidden: bool,
+    /// Name that lets a second start find this instance.
+    pub instance_key: String,
+}
+
+pub fn run(
+    paths: AppPaths,
+    loaded: Loaded,
+    log: LogBuffer,
+    options: StartOptions,
+) -> anyhow::Result<()> {
+    let compatibility = loaded.config.advanced.compatibility_graphics
+        || std::env::var("AETERNAVAULT_RENDERER").is_ok_and(|v| v.eq_ignore_ascii_case("glow"));
+
+    if !compatibility {
+        match launch(
+            eframe::Renderer::Wgpu,
+            paths.clone(),
+            loaded.clone(),
+            log.clone(),
+            options.clone(),
+        ) {
+            Ok(()) => return Ok(()),
+            // Some graphics drivers fail with Direct3D 12; OpenGL usually works there.
+            Err(err) => tracing::warn!("Direct3D renderer failed, trying OpenGL: {err}"),
+        }
+    }
+    launch(eframe::Renderer::Glow, paths, loaded, log, options).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+fn launch(
+    renderer: eframe::Renderer,
+    paths: AppPaths,
+    loaded: Loaded,
+    log: LogBuffer,
+    options: StartOptions,
+) -> Result<(), eframe::Error> {
     let lang = Lang::resolve(loaded.config.language);
+    let (size, min_size) = window_sizes();
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(lang.t().window_title)
-        .with_inner_size([1000.0, 800.0])
-        .with_min_inner_size([760.0, 580.0]);
+        .with_inner_size(size)
+        .with_min_inner_size(min_size)
+        .with_visible(!options.hidden);
     match eframe::icon_data::from_png_bytes(include_bytes!(
         "../../assets/icon/aeterna-vault-256.png"
     )) {
@@ -54,22 +98,57 @@ pub fn run(paths: AppPaths, loaded: Loaded, log: LogBuffer) -> anyhow::Result<()
         Err(err) => tracing::warn!("window icon could not be loaded: {err}"),
     }
 
-    let options = eframe::NativeOptions {
+    let mut native = eframe::NativeOptions {
         viewport,
         centered: true,
+        renderer,
         ..Default::default()
     };
+    native.wgpu_options.wgpu_setup = wgpu_setup();
+    tracing::info!(?renderer, ?size, hidden = options.hidden, "opening window");
 
     eframe::run_native(
         "AeternaVault",
-        options,
+        native,
         Box::new(move |cc| {
             theme::install_fonts(&cc.egui_ctx, &loaded.config.fonts);
             theme::apply(&cc.egui_ctx, loaded.config.appearance);
-            Ok(Box::new(AeternaApp::new(&cc.egui_ctx, paths, loaded, log)))
+            let mut app = AeternaApp::new(&cc.egui_ctx, paths, loaded, log);
+            app.start_background(&cc.egui_ctx, &options);
+            Ok(Box::new(app))
         }),
     )
-    .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Start and minimum size in points, limited to the screen's work area so the
+/// window never opens larger than the screen (e.g. 1366×768 at 125 % scaling).
+fn window_sizes() -> ([f32; 2], [f32; 2]) {
+    const WANTED: [f32; 2] = [1000.0, 800.0];
+    const MINIMUM: [f32; 2] = [760.0, 560.0];
+    let Some((width, height)) = platform::work_area_points() else {
+        return (WANTED, MINIMUM);
+    };
+    // Leave room for the title bar and a little air around the window.
+    let (max_w, max_h) = (width * 0.94, height * 0.90);
+    let size = [WANTED[0].min(max_w), WANTED[1].min(max_h)];
+    let min = [MINIMUM[0].min(size[0]), MINIMUM[1].min(size[1])];
+    (size, min)
+}
+
+/// Direct3D 12 on the integrated (power-saving) graphics chip. Hybrid laptops
+/// otherwise wake the dedicated GPU, which can flicker at start; Vulkan layers
+/// of overlay tools are a frequent source of glitches as well. The usual
+/// `WGPU_BACKEND` / `WGPU_POWER_PREF` environment variables still override this.
+fn wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
+    use eframe::wgpu;
+    let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
+    if cfg!(windows) && wgpu::Backends::from_env().is_none() {
+        setup.instance_descriptor.backends = wgpu::Backends::DX12;
+    }
+    if wgpu::PowerPreference::from_env().is_none() {
+        setup.power_preference = wgpu::PowerPreference::LowPower;
+    }
+    eframe::egui_wgpu::WgpuSetup::CreateNew(setup)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +260,8 @@ pub enum VaultDialog {
     ShowRecovery {
         key: String,
         confirmed: bool,
+        /// egui time of the last click on "Copy", for a short confirmation.
+        copied_at: Option<f64>,
     },
     Unlock {
         secret: String,
@@ -204,10 +285,15 @@ pub struct VaultUi {
     pub dialog: Option<VaultDialog>,
 }
 
+/// A schedule being created or changed in the dialog.
+pub struct ScheduleEditor {
+    pub schedule: Schedule,
+    pub is_new: bool,
+}
+
+#[derive(Default)]
 pub struct ScheduleUi {
-    /// The schedule that is currently installed in the Task Scheduler.
-    pub applied: Option<Schedule>,
-    pub job: Option<Job<(Schedule, Result<(), String>)>>,
+    pub editor: Option<ScheduleEditor>,
 }
 
 pub struct AeternaApp {
@@ -238,6 +324,7 @@ pub struct AeternaApp {
     pub tree: TreeUi,
     pub vault: VaultUi,
     pub schedule: ScheduleUi,
+    pub background: Option<Background>,
     config_dirty: bool,
     applied_title: Option<Lang>,
 }
@@ -279,14 +366,13 @@ impl AeternaApp {
             apps: AppsUi::default(),
             tree: TreeUi::default(),
             vault: VaultUi::default(),
-            schedule: ScheduleUi {
-                applied: None,
-                job: None,
-            },
+            schedule: ScheduleUi::default(),
+            background: None,
             config_dirty: false,
             applied_title: Some(lang),
         };
 
+        ctx.set_zoom_factor(app.config.zoom_factor());
         if let Some(notice) = loaded.notice {
             app.config_notice(notice);
         }
@@ -300,14 +386,14 @@ impl AeternaApp {
                 },
                 text,
             );
-            app.state.acknowledged_at = Some(chrono::Utc::now());
-            app.state.save(&app.paths.config_file);
+            app.state = State::update(&app.paths.config_file, |state| {
+                state.acknowledged_at = Some(chrono::Utc::now());
+            });
         }
         app.refresh_vault();
         app.refresh_sizes(ctx);
         app.refresh_snapshots(ctx);
         app.refresh_app_status(ctx);
-        app.check_schedule_on_start(ctx);
         app
     }
 
@@ -339,14 +425,22 @@ impl AeternaApp {
         self.config_dirty = true;
     }
 
+    /// A backup or restore runs, from the window or automatically.
     pub fn is_busy(&self) -> bool {
         self.task.is_some()
+            || self
+                .background
+                .as_ref()
+                .is_some_and(|b| b.service.is_running())
     }
 
     fn save_if_dirty(&mut self) {
-        if !self.config_dirty {
-            return;
+        if self.config_dirty {
+            self.save_now();
         }
+    }
+
+    pub fn save_now(&mut self) {
         self.config_dirty = false;
         if let Err(err) = self.config.save(&self.paths.config_file) {
             tracing::error!("configuration could not be saved: {err}");
@@ -354,6 +448,9 @@ impl AeternaApp {
                 NoticeKind::Error,
                 self.lang.config_not_saved(&err.to_string()),
             );
+        }
+        if let Some(background) = &self.background {
+            background.service.set_config(&self.config);
         }
     }
 
@@ -511,9 +608,15 @@ fn theme_toggle(ui: &mut Ui, dark: bool) -> egui::Response {
 }
 
 impl eframe::App for AeternaApp {
+    /// Runs before every frame, and also while the window is hidden.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_jobs(ctx);
+        self.background_tick(ctx);
+        self.save_if_dirty();
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        self.poll_jobs(&ctx);
         self.handle_dropped_folders(&ctx);
         self.refresh_running_processes(&ctx);
 
@@ -592,7 +695,7 @@ impl eframe::App for AeternaApp {
 
         dialogs::confirmation(self, ui);
         dialogs::vault_dialog(self, ui);
-        self.apply_schedule(&ctx);
+        dialogs::schedule_dialog(self, ui);
         self.save_if_dirty();
     }
 

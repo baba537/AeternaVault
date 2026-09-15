@@ -36,18 +36,62 @@ fn wrapped(ui: &mut Ui, text: &str, color: Option<egui::Color32>) {
     ui.add(egui::Label::new(rich).wrap());
 }
 
-/// A password field that fills the dialog width.
-fn secret_field(ui: &mut Ui, value: &mut String, hint: &str, focus: bool) -> egui::Response {
-    let response = ui.add(
-        egui::TextEdit::singleline(value)
-            .password(true)
-            .hint_text(hint)
-            .desired_width(f32::INFINITY),
-    );
+/// A password field that fills the dialog width, with an eye button to show
+/// what was typed. Whether it is shown is kept per field in egui's memory.
+pub(super) fn secret_field(
+    ui: &mut Ui,
+    value: &mut String,
+    hint: &str,
+    focus: bool,
+    lang: crate::i18n::Lang,
+) -> egui::Response {
+    let t = lang.t();
+    let visible_id = ui.id().with(("secret-visible", hint));
+    let mut visible = ui.data(|d| d.get_temp::<bool>(visible_id)).unwrap_or(false);
+    let inner = ui.horizontal(|ui| {
+        let button_width = 34.0;
+        let width = ui.available_width() - button_width - ui.spacing().item_spacing.x;
+        let response = ui.add(
+            egui::TextEdit::singleline(value)
+                .password(!visible)
+                .hint_text(hint)
+                .desired_width(width.max(80.0)),
+        );
+        let label = if visible {
+            t.hide_secret
+        } else {
+            t.show_secret
+        };
+        if widgets::eye_button(ui, visible, label).clicked() {
+            visible = !visible;
+        }
+        response
+    });
+    ui.data_mut(|d| d.insert_temp(visible_id, visible));
+    let response = inner.inner;
     if focus && !response.has_focus() && ui.memory(|m| m.focused().is_none()) {
         response.request_focus();
     }
     response
+}
+
+/// Shows "Copied" for a moment after `copied_at` (egui time in seconds).
+fn copied_feedback(ui: &mut Ui, copied_at: Option<f64>, text: &str) {
+    let Some(at) = copied_at else {
+        return;
+    };
+    let p = *palette(ui);
+    let age = ui.input(|i| i.time) - at;
+    const VISIBLE: f64 = 2.5;
+    if (0.0..VISIBLE).contains(&age) {
+        let fade = ((VISIBLE - age) / 0.4).clamp(0.0, 1.0) as f32;
+        ui.label(
+            egui::RichText::new(format!("✓ {text}"))
+                .size(13.5)
+                .color(p.success.gamma_multiply(fade)),
+        );
+        ui.ctx().request_repaint();
+    }
 }
 
 pub fn confirmation(app: &mut AeternaApp, ui: &mut Ui) {
@@ -141,6 +185,235 @@ pub fn confirmation(app: &mut AeternaApp, ui: &mut Ui) {
     }
 }
 
+/// Creating or changing one automatic backup.
+pub fn schedule_dialog(app: &mut AeternaApp, ui: &mut Ui) {
+    use crate::config::{Frequency, Weekday};
+
+    let Some(mut editor) = app.schedule.editor.take() else {
+        return;
+    };
+    let t = app.lang.t();
+    let lang = app.lang;
+    let ctx = ui.ctx().clone();
+    let mut keep_open = true;
+    let mut save = false;
+
+    let title = if editor.is_new {
+        t.schedule_new_title
+    } else {
+        t.schedule_edit_title
+    };
+    let sources: Vec<(std::path::PathBuf, String)> = app
+        .config
+        .sources
+        .iter()
+        .map(|s| (s.path.clone(), s.display_name()))
+        .collect();
+
+    let modal = egui::Modal::new(egui::Id::new("schedule-editor"))
+        .frame(modal_frame(ui))
+        .show(&ctx, |ui| {
+            let p = *palette(ui);
+            ui.set_width(dialog_width(ui, 540.0));
+            heading(ui, title);
+            let schedule = &mut editor.schedule;
+
+            widgets::secondary_text(ui, t.schedule_when);
+            ui.horizontal_wrapped(|ui| {
+                let label = |f: Frequency| match f {
+                    Frequency::Daily => t.freq_daily,
+                    Frequency::Weekly => t.freq_weekly,
+                    Frequency::Hourly => t.freq_hourly,
+                    Frequency::AtStart => t.freq_at_start,
+                };
+                egui::ComboBox::from_id_salt("schedule-frequency")
+                    .selected_text(label(schedule.frequency))
+                    .width(210.0)
+                    .show_ui(ui, |ui| {
+                        for f in [
+                            Frequency::Daily,
+                            Frequency::Weekly,
+                            Frequency::Hourly,
+                            Frequency::AtStart,
+                        ] {
+                            ui.selectable_value(&mut schedule.frequency, f, label(f));
+                        }
+                    });
+                if schedule.frequency == Frequency::Weekly {
+                    ui.label(t.on_day);
+                    egui::ComboBox::from_id_salt("schedule-weekday")
+                        .selected_text(t.weekdays[schedule.weekday as usize])
+                        .width(130.0)
+                        .show_ui(ui, |ui| {
+                            for day in Weekday::ALL {
+                                ui.selectable_value(
+                                    &mut schedule.weekday,
+                                    day,
+                                    t.weekdays[day as usize],
+                                );
+                            }
+                        });
+                }
+                if schedule.frequency == Frequency::Hourly {
+                    egui::ComboBox::from_id_salt("schedule-hours")
+                        .selected_text(lang.every_hours(schedule.every_hours))
+                        .width(150.0)
+                        .show_ui(ui, |ui| {
+                            for hours in [1u8, 2, 3, 4, 6, 8, 12] {
+                                ui.selectable_value(
+                                    &mut schedule.every_hours,
+                                    hours,
+                                    lang.every_hours(hours),
+                                );
+                            }
+                        });
+                    ui.label(t.starting_at);
+                }
+                if schedule.frequency != Frequency::AtStart {
+                    if schedule.frequency != Frequency::Hourly {
+                        ui.label(t.at_time);
+                    }
+                    time_picker(ui, &mut schedule.time);
+                }
+            });
+            if schedule.frequency == Frequency::AtStart {
+                widgets::secondary_text(ui, t.at_start_hint);
+            }
+            ui.add_space(4.0);
+            ui.checkbox(&mut schedule.catch_up, t.catch_up);
+            ui.checkbox(&mut schedule.only_on_ac_power, t.only_ac);
+
+            ui.add_space(12.0);
+            widgets::secondary_text(ui, t.schedule_what);
+            ui.radio_value(&mut schedule.all_folders, true, t.scope_radio_everything);
+            ui.radio_value(&mut schedule.all_folders, false, t.scope_radio_only);
+            if !schedule.all_folders {
+                ui.indent("schedule-folders", |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for (path, name) in &sources {
+                            let mut on = schedule
+                                .folders
+                                .iter()
+                                .any(|f| crate::engine::paths_equal(f, path));
+                            if ui.checkbox(&mut on, name).changed() {
+                                if on {
+                                    schedule.folders.push(path.clone());
+                                } else {
+                                    schedule
+                                        .folders
+                                        .retain(|f| !crate::engine::paths_equal(f, path));
+                                }
+                            }
+                        }
+                    });
+                });
+            }
+            ui.checkbox(&mut schedule.applications, t.apps_card_title);
+
+            ui.add_space(12.0);
+            widgets::secondary_text(ui, t.schedule_name);
+            let hint = crate::automatic::when_text(schedule, lang);
+            ui.add(
+                egui::TextEdit::singleline(&mut schedule.name)
+                    .hint_text(hint)
+                    .desired_width(f32::INFINITY),
+            );
+
+            let nothing = !schedule.applications
+                && !schedule.all_folders
+                && !schedule.folders.iter().any(|f| {
+                    sources
+                        .iter()
+                        .any(|(path, _)| crate::engine::paths_equal(f, path))
+                });
+            if nothing {
+                ui.add_space(4.0);
+                wrapped(ui, t.scope_nothing, Some(p.warning));
+            }
+
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if widgets::button(ui, ButtonKind::Primary, t.save, !nothing).clicked() {
+                        save = true;
+                    }
+                    if widgets::button(ui, ButtonKind::Secondary, t.cancel, true).clicked() {
+                        keep_open = false;
+                    }
+                });
+            });
+        });
+    if modal.should_close() {
+        keep_open = false;
+    }
+    if save {
+        let mut schedule = editor.schedule;
+        if schedule.all_folders {
+            schedule.folders.clear();
+        }
+        schedule.name = schedule.name.trim().to_string();
+        app.save_schedule(schedule);
+    } else if keep_open {
+        app.schedule.editor = Some(editor);
+    }
+}
+
+/// Hours and minutes (in 15-minute steps) as two small drop-downs.
+fn time_picker(ui: &mut Ui, time: &mut String) {
+    let (mut hour, mut minute) = time
+        .split_once(':')
+        .and_then(|(h, m)| Some((h.trim().parse::<u32>().ok()?, m.trim().parse::<u32>().ok()?)))
+        .unwrap_or((20, 0));
+    hour = hour.min(23);
+    minute = (minute / 15) * 15;
+    let before = (hour, minute);
+    egui::ComboBox::from_id_salt("schedule-hour")
+        .selected_text(format!("{hour:02}"))
+        .width(56.0)
+        .show_ui(ui, |ui| {
+            for h in 0..24 {
+                ui.selectable_value(&mut hour, h, format!("{h:02}"));
+            }
+        });
+    ui.label(":");
+    egui::ComboBox::from_id_salt("schedule-minute")
+        .selected_text(format!("{minute:02}"))
+        .width(56.0)
+        .show_ui(ui, |ui| {
+            for m in [0, 15, 30, 45] {
+                ui.selectable_value(&mut minute, m, format!("{m:02}"));
+            }
+        });
+    if (hour, minute) != before || !time.contains(':') {
+        *time = format!("{hour:02}:{minute:02}");
+    }
+}
+
+/// Dialog width that still fits into small windows.
+fn dialog_width(ui: &Ui, wanted: f32) -> f32 {
+    wanted
+        .min(ui.ctx().content_rect().width() - 120.0)
+        .max(300.0)
+}
+
+/// Asks for a file name and writes the recovery key with a short explanation.
+/// `None` if the user cancelled the file dialog.
+fn save_recovery_file(
+    lang: crate::i18n::Lang,
+    key: &str,
+    vault_id: &str,
+    destination: &std::path::Path,
+) -> Option<Result<(), String>> {
+    let path = rfd::FileDialog::new()
+        .set_file_name(lang.t().recovery_file_name)
+        .add_filter("Text", &["txt"])
+        .save_file()?;
+    let text = lang.recovery_file_text(key, vault_id, &destination.display().to_string());
+    // Notepad-friendly line endings.
+    let text = text.replace('\n', "\r\n");
+    Some(std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display())))
+}
+
 fn strength_meter(ui: &mut Ui, passphrase: &str, labels: [&str; 5]) {
     let p = *palette(ui);
     let strength = passphrase_strength(passphrase);
@@ -177,7 +450,8 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
         return;
     };
     let ctx = ui.ctx().clone();
-    let t = app.lang.t();
+    let lang = app.lang;
+    let t = lang.t();
     let frame = modal_frame(ui);
     let mut keep_open = true;
     let mut next: Option<VaultDialog> = None;
@@ -194,13 +468,13 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
                 .frame(frame)
                 .show(&ctx, |ui| {
                     let p = *palette(ui);
-                    ui.set_width(460.0);
+                    ui.set_width(dialog_width(ui, 500.0));
                     heading(ui, t.enc_create_title);
                     wrapped(ui, t.enc_create_hint, Some(p.text_secondary));
                     ui.add_space(10.0);
-                    secret_field(ui, passphrase, t.passphrase, true);
+                    secret_field(ui, passphrase, t.passphrase, true, lang);
                     strength_meter(ui, passphrase, t.strength);
-                    let repeat_field = secret_field(ui, repeat, t.passphrase_repeat, false);
+                    let repeat_field = secret_field(ui, repeat, t.passphrase_repeat, false, lang);
                     if repeat_field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         submit = true;
                     }
@@ -237,6 +511,7 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
                             next = Some(VaultDialog::ShowRecovery {
                                 key,
                                 confirmed: false,
+                                copied_at: None,
                             });
                         }
                         Err(message) => *error = Some(message),
@@ -245,38 +520,62 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
             }
         }
 
-        VaultDialog::ShowRecovery { key, confirmed } => {
+        VaultDialog::ShowRecovery {
+            key,
+            confirmed,
+            copied_at,
+        } => {
+            let destination = app.config.destination.clone();
+            let vault_id = app
+                .vault
+                .header
+                .as_ref()
+                .map(|h| h.vault_id.clone())
+                .unwrap_or_default();
+            let mut saved: Option<Result<(), String>> = None;
             let modal = egui::Modal::new(egui::Id::new("vault-recovery"))
                 .frame(frame)
                 .show(&ctx, |ui| {
                     let p = *palette(ui);
-                    ui.set_width(480.0);
+                    ui.set_width(dialog_width(ui, 580.0));
                     heading(ui, t.recovery_title);
                     wrapped(ui, t.recovery_hint, Some(p.text_secondary));
                     ui.add_space(12.0);
+                    // The key gets the full width of its own frame; the buttons sit below,
+                    // so nothing can cover it.
                     Frame::new()
                         .fill(p.raised)
                         .stroke(Stroke::new(1.0, p.accent))
                         .corner_radius(CornerRadius::same(6))
-                        .inner_margin(Margin::symmetric(16, 12))
+                        .inner_margin(Margin::symmetric(16, 14))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new(key.as_str())
-                                        .monospace()
-                                        .size(16.0)
-                                        .color(p.text),
+                            ui.vertical_centered(|ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(key.as_str())
+                                            .monospace()
+                                            .size(17.0)
+                                            .color(p.text),
+                                    )
+                                    .wrap(),
                                 );
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if widgets::button(ui, ButtonKind::Quiet, t.copy, true)
-                                        .clicked()
-                                    {
-                                        ui.ctx().copy_text(key.clone());
-                                    }
-                                });
                             });
                         });
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if widgets::button(ui, ButtonKind::Secondary, t.copy, true).clicked() {
+                            ui.ctx().copy_text(key.clone());
+                            *copied_at = Some(ui.input(|i| i.time));
+                        }
+                        if widgets::button(ui, ButtonKind::Quiet, t.save_as_file, true).clicked() {
+                            saved = save_recovery_file(lang, key, &vault_id, &destination);
+                            if saved.is_some() {
+                                *copied_at = None;
+                            }
+                        }
+                        copied_feedback(ui, *copied_at, t.copied);
+                    });
                     ui.add_space(10.0);
                     ui.checkbox(confirmed, t.recovery_confirm);
                     ui.add_space(14.0);
@@ -292,6 +591,11 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
                 });
             // Closing by Escape or clicking outside is not allowed before confirming.
             let _ = modal;
+            match saved {
+                Some(Ok(())) => app.notify(NoticeKind::Success, t.recovery_file_saved),
+                Some(Err(message)) => app.notify(NoticeKind::Error, message),
+                None => {}
+            }
         }
 
         VaultDialog::Unlock {
@@ -306,11 +610,11 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
                 .frame(frame)
                 .show(&ctx, |ui| {
                     let p = *palette(ui);
-                    ui.set_width(440.0);
+                    ui.set_width(dialog_width(ui, 480.0));
                     heading(ui, t.unlock_title);
                     wrapped(ui, t.unlock_hint, Some(p.text_secondary));
                     ui.add_space(10.0);
-                    let field = secret_field(ui, secret, t.passphrase, true);
+                    let field = secret_field(ui, secret, t.passphrase, true, lang);
                     if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         submit = true;
                     }
@@ -361,13 +665,13 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
                 .frame(frame)
                 .show(&ctx, |ui| {
                     let p = *palette(ui);
-                    ui.set_width(440.0);
+                    ui.set_width(dialog_width(ui, 480.0));
                     heading(ui, t.change_title);
                     wrapped(ui, t.change_hint, Some(p.text_secondary));
                     ui.add_space(10.0);
-                    secret_field(ui, passphrase, t.new_passphrase, true);
+                    secret_field(ui, passphrase, t.new_passphrase, true, lang);
                     strength_meter(ui, passphrase, t.strength);
-                    secret_field(ui, repeat, t.passphrase_repeat, false);
+                    secret_field(ui, repeat, t.passphrase_repeat, false, lang);
                     if let Some(error) = error.as_ref() {
                         ui.add_space(4.0);
                         wrapped(ui, error, Some(p.error));
