@@ -480,6 +480,42 @@ fn render_readme_screenshots() {
     settle(&mut h);
     save(&mut h, "restore");
 
+    // 4b. Backups view with one backup ticked.
+    let mut h = build(1000.0, &|config| config.language = LanguageSetting::En);
+    h.state_mut().view = View::Backups;
+    settle(&mut h);
+    if let Some(first) = h.state().all_snapshots().first().map(|s| s.qualified_id()) {
+        h.state_mut().manage.checked.insert(first);
+    }
+    settle(&mut h);
+    save(&mut h, "backups");
+
+    // Checks that are not part of the README (prefixed "check-").
+    let mut h = build(2600.0, &|config| config.language = LanguageSetting::En);
+    h.state_mut().view = View::Apps;
+    settle(&mut h);
+    wait_until(&mut h, "installed programs", |app| {
+        app.apps.installed.is_some()
+    });
+    settle(&mut h);
+    save(&mut h, "check-applications-full");
+
+    let mut h = build(800.0, &|config| config.language = LanguageSetting::De);
+    settle(&mut h);
+    h.state_mut().vault.dialog = Some(VaultDialog::ShowRecovery {
+        key: "K7QM-2HXA-9WTC-4RBN-P8ZE-6JDF-3VYS-1MQK".into(),
+        confirmed: false,
+        copied_at: None,
+    });
+    settle(&mut h);
+    save(&mut h, "check-recovery-dialog");
+
+    let mut h = build(900.0, &|config| config.language = LanguageSetting::De);
+    settle(&mut h);
+    h.state_mut().new_schedule();
+    settle(&mut h);
+    save(&mut h, "check-schedule-dialog");
+
     // 5. Encryption set-up dialog.
     let mut h = build(800.0, &|config| config.language = LanguageSetting::En);
     settle(&mut h);

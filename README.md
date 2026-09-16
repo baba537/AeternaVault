@@ -86,10 +86,12 @@ The interface speaks **English and German** and can be switched at any time.
     <td align="center"><sub>Choosing what to restore</sub></td>
   </tr>
   <tr>
-    <td colspan="2"><img src="docs/screenshots/overview-de-light.png" alt="Main window in light appearance with German interface"></td>
+    <td><img src="docs/screenshots/backups.png" alt="Backups view with check, browse, copy, move and delete actions and retention rules"></td>
+    <td><img src="docs/screenshots/overview-de-light.png" alt="Main window in light appearance with German interface"></td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><sub>Light appearance, German interface</sub></td>
+    <td align="center"><sub>Managing backups</sub></td>
+    <td align="center"><sub>Light appearance, German interface</sub></td>
   </tr>
 </table>
 
