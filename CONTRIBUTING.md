@@ -72,15 +72,28 @@ The same checks run in CI.
 ## Guidelines
 
 - **The preview must stay read-only.** `engine/plan.rs`, `engine/scan.rs`,
-  `engine/sources.rs`, `engine/selection.rs`, `engine/snapshots.rs` and
-  `engine/manifest.rs` must not write to disk or the registry. File writing goes
-  through `engine/fsops.rs`. A unit test checks this.
-- **Never delete user data.** Restores only create or replace files and registry
-  values; backups only add new backup folders and blobs.
-- **Cryptography changes** need a matching update of `docs/ENCRYPTION.md` and a
-  new format version; existing vaults must stay readable.
-- **Tests must not change the system.** Do not install scheduled tasks or write
-  outside temporary folders (the registry test uses a throw-away HKCU key).
+  `engine/sources.rs`, `engine/selection.rs`, `engine/snapshots.rs`,
+  `engine/manifest.rs`, `engine/verify.rs` and `engine/retention.rs` must not
+  write to disk or the registry. File writing goes through `engine/fsops.rs`.
+  A unit test checks this.
+- **Never delete user data behind the user's back.** Restores only create or
+  replace files and registry values; backups only add new backup folders and
+  blobs. Deleting backups happens only on request, and never leaves another
+  backup incomplete.
+- **Cryptography changes** need a matching update of `docs/ENCRYPTION.md` and of
+  `tools/aeterna-decrypt.py`, and a new format version; existing vaults must stay
+  readable. Check the script against sample vaults:
+
+  ```powershell
+  $env:AETERNAVAULT_REFERENCE_DIR = "$env:TEMP\aeterna-reference"
+  cargo test write_reference_vaults -- --ignored
+  $env:AETERNAVAULT_PASSPHRASE = 'reference passphrase'
+  python tools\aeterna-decrypt.py "$env:TEMP\aeterna-reference\aes256gcm\Vault" extract latest out
+  ```
+- **Tests must not change the system.** Do not register autostart entries or file
+  associations, use the recycle bin, or write outside temporary folders (the
+  registry test uses a throw-away HKCU key). `platform::system_changes_allowed()`
+  is false in tests and in demo mode.
 - **Code and comments in English.** Keep comments short and explain *why*
   something is done, especially around Windows APIs.
 - **User-facing text lives in `src/i18n.rs`.** Add every new text in English and

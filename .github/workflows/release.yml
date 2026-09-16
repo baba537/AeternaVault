@@ -9,6 +9,9 @@ on:
 
 permissions:
   contents: write
+  # Signed build provenance (verify with `gh attestation verify`).
+  id-token: write
+  attestations: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -61,23 +64,45 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "signing failed" }
           Remove-Item $pfx
 
+      - name: Install cargo-cyclonedx
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-cyclonedx
+
+      # Software bill of materials: every crate that went into the executable.
+      - name: SBOM
+        shell: pwsh
+        run: |
+          cargo cyclonedx --format json
+          $bom = Get-ChildItem -Filter *.cdx.json | Select-Object -First 1
+          if (-not $bom) { throw "no SBOM was written" }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item $bom.FullName dist\sbom.cdx.json
+
       - name: Package
         shell: pwsh
         run: |
           $tag = '${{ github.ref_name }}'
-          New-Item -ItemType Directory dist | Out-Null
+          New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item target\release\AeternaVault.exe dist\AeternaVault.exe
 
           $package = "AeternaVault-$tag-windows-x64"
           $staging = Join-Path $env:RUNNER_TEMP $package
           New-Item -ItemType Directory $staging | Out-Null
-          Copy-Item target\release\AeternaVault.exe, README.md, CHANGELOG.md, LICENSE-MIT, LICENSE-APACHE $staging
+          Copy-Item target\release\AeternaVault.exe, README.md, CHANGELOG.md, LICENSE-MIT, LICENSE-APACHE, docs\ENCRYPTION.md, tools\aeterna-decrypt.py $staging
           Compress-Archive -Path "$staging\*" -DestinationPath "dist\$package.zip"
 
           Get-ChildItem dist -File | ForEach-Object {
             '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
           } | Set-Content dist\SHA256SUMS.txt -Encoding ascii
           Get-Content dist\SHA256SUMS.txt
+
+      - name: Build provenance attestation
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: |
+            dist/AeternaVault.exe
+            dist/*.zip
 
       - name: Release notes from CHANGELOG.md
         shell: pwsh
@@ -97,7 +122,7 @@ jobs:
           while ($last -ge 0 -and [string]::IsNullOrWhiteSpace($notes[$last])) { $last-- }
           $notes = if ($last -ge 0) { @($notes[0..$last]) } else { @() }
           $notes += ''
-          $notes += '**Verify the download** (PowerShell): `Get-FileHash .\AeternaVault.exe -Algorithm SHA256` and compare with `SHA256SUMS.txt`.'
+          $notes += '**Verify the download** (PowerShell): `Get-FileHash .\AeternaVault.exe -Algorithm SHA256` and compare with `SHA256SUMS.txt`, or check the build provenance with `gh attestation verify .\AeternaVault.exe --repo baba537/AeternaVault`.'
           $notes | Set-Content release-notes.md -Encoding utf8
 
       - name: Publish GitHub release

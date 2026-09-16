@@ -10,13 +10,17 @@ describes the current state and the reasons behind it. None of it is set in ston
 ```text
 src/
 ├── main.rs            entry point: GUI without arguments, CLI with a subcommand
-├── cli.rs             command line (clap): backup [--scheduled], snapshots, restore, paths
+├── cli.rs             command line (clap): backup, snapshots, restore [--destination], open, paths
 ├── config.rs          TOML configuration with defaults for every field
 ├── paths.rs           where config and logs live (standard, portable, env override)
-├── state.rs           result of the last automatic backup
+├── state.rs           when each schedule last ran (shared by window and service)
 ├── i18n.rs            all user-facing texts, English and German
 ├── logging.rs         tracing: rotating log file + in-memory buffer for the GUI
 ├── error.rs           engine error type
+├── automatic/
+│   ├── mod.rs         unattended backup (shared with the CLI), retention after runs
+│   ├── timing.rs      when a schedule is due (pure, tested)
+│   └── service.rs     background thread that runs due schedules
 ├── engine/
 │   ├── mod.rs         shared helpers, progress, cancellation, read-only guard test
 │   ├── sources.rs     config + catalog → concrete folders and registry keys (read-only)
@@ -25,10 +29,13 @@ src/
 │   ├── snapshots.rs   finds plain, encrypted and legacy backups (read-only)
 │   ├── manifest.rs    on-disk format of a backup (read-only)
 │   ├── plan.rs        preview / dry run: BackupPlan, RestorePlan (read-only)
-│   ├── backup.rs      executes a BackupPlan (plain or encrypted)
+│   ├── verify.rs      check a backup without restoring (read-only)
+│   ├── retention.rs   which old backups the rules would remove (read-only)
+│   ├── manage.rs      delete (with re-homing), move, extract, prune vault blobs
+│   ├── backup.rs      executes a BackupPlan (plain part, encrypted part, or both)
 │   ├── restore.rs     executes a RestorePlan (files and registry)
 │   ├── fsops.rs       the only place that writes files; destination lock
-│   ├── crypto.rs      Argon2id, XChaCha20-Poly1305 stream format, key slots
+│   ├── crypto.rs      Argon2id, XChaCha20-Poly1305 / AES-256-GCM streams, key slots
 │   ├── vault.rs       encrypted vault on disk, remembered keys
 │   ├── export.rs      preview export as text / CSV
 │   └── tests.rs       end-to-end tests on temporary folders
@@ -39,17 +46,23 @@ src/
 │   ├── apps.toml      the built-in catalog (63 applications and Windows settings)
 │   ├── known_paths.rs {APPDATA}-style portable paths, profile remapping
 │   ├── registry.rs    HKCU export/import, .reg files
-│   ├── scheduler.rs   Windows Task Scheduler task for automatic backups
+│   ├── scheduler.rs   removes the Task Scheduler entry of 0.2
+│   ├── tray.rs        notification area icon (Shell_NotifyIconW on its own thread)
+│   ├── instance.rs    one window per configuration, activating the running one
+│   ├── autostart.rs   HKCU Run entry for "start with Windows"
+│   ├── file_association.rs  .avault double-click (HKCU\Software\Classes)
 │   └── vss.rs         FileReader interface; Volume Shadow Copy comes later
 └── gui/
     ├── mod.rs         application state and frame layout
     ├── actions.rs     background loaders, tasks, vault and schedule handling
+    ├── background.rs  tray events, hide on close, connection to the service
+    ├── manage.rs      check, delete, move, browse, extract; viewer mode
     ├── dialogs.rs     confirmation and encryption dialogs
     ├── theme.rs       palette, typography, fonts
     ├── widgets.rs     cards, buttons, toggle, section titles, logo, progress line
     ├── tasks.rs       worker threads with progress and cancellation
     ├── tests.rs       interface tests (egui_kittest) and screenshot rendering
-    └── views/         backup, restore, preview, working/done, apps, settings, activity
+    └── views/         backup, restore, backups, browse, preview, working/done, apps, settings, activity
 ```
 
 ## Data flow
@@ -109,18 +122,41 @@ profile path (e.g. `C:\Users\anna\…`) are rewritten to the new profile.
 The engine is synchronous. The GUI runs every plan and execution on a worker
 thread (`gui/tasks.rs`) and receives progress through a channel; each message
 wakes the UI with `request_repaint`. Folder sizes, the backup list, application
-detection and Task Scheduler changes are small background jobs as well.
+detection and retention clean-up are small background jobs as well.
 Cancellation is a shared atomic flag checked between files and between 1 MiB
 chunks. Panics in a worker are caught and shown as a calm error.
 
 ### Automatic backups
 
-Turning the switch on creates `\AeternaVault\Automatic backup` in the Task
-Scheduler (`schtasks /Create /XML`, current user, least privilege). The task runs
-`AeternaVault.exe backup --scheduled`, which lowers CPU and I/O priority, uses a
-remembered vault key if encryption is on, skips quietly when the destination is
-not connected, and writes the outcome to `state.json`. A lock file in the
-destination prevents two backups from running at once.
+AeternaVault runs schedules itself (`automatic/service.rs`): a thread wakes every
+20 seconds or when poked, asks `timing::is_due` for each schedule, and runs the
+first due one through `automatic::run_unattended` with background thread
+priority. Occurrences before a schedule was switched on (`armed_at` in
+`state.json`) are ignored; missed ones are made up once; a run skipped because
+the drive was missing is retried every 15 minutes. The service never depends on
+egui frames: while the window is hidden, eframe only calls `App::logic`, which
+handles tray and service events. Closing the window hides it while schedules are
+on; the tray icon lives on its own Win32 thread. A named mutex keeps one
+instance per configuration, and a second start posts a message to the tray
+window of the running one. A lock file in the destination prevents two backups
+(window, service, another computer) from writing at once.
+
+### Partly encrypted backups
+
+Each plan item carries `encrypted`. `backup.rs` writes a plain folder for the
+unmarked items and an `.avs` index for the marked ones under the same id, both
+with `split: true`; `snapshots::list` attaches the encrypted part to the plain
+one as `companion`, and restore, verify, move and delete work on both parts.
+Incremental reuse only happens within the same part.
+
+### Deleting safely
+
+On file systems without hard links, a plain incremental backup refers to files
+stored in an older backup. `manage::delete` first copies such files into every
+remaining backup that needs them (updating its `files.json`), then moves the
+folder to the recycle bin (or deletes it where there is none). Encrypted blobs
+are shared; they are removed only if no remaining encrypted index, all of which
+must be readable, refers to them.
 
 ## Backup format
 
@@ -153,12 +189,12 @@ Encrypted: see [ENCRYPTION.md](ENCRYPTION.md).
 | Area | Crate | Why | Alternatives |
 |---|---|---|---|
 | GUI | `eframe` / `egui` | One dependency, draws everything itself, easy to give a custom calm look, immediate mode keeps state simple | `iced` (Elm architecture), `slint` (declarative UI files), `tauri` (HTML/CSS UI, WebView2) |
-| Renderer | `wgpu` (default) | Direct3D 12 with software fallback: works in VMs and remote sessions | `glow` feature: OpenGL, smaller executable |
+| Renderer | `wgpu` + `glow` | Direct3D 12 on the power-saving GPU; OpenGL if Direct3D fails or on request ("compatibility graphics") | only one of them: smaller executable |
 | Dialogs | `rfd` | Native Windows file and folder pickers | `windows` crate `IFileOpenDialog` |
 | Windows APIs | `windows-sys` | Raw bindings for DPAPI, Toolhelp, priority, attributes; fast compile | `windows` (safer wrappers; needed for VSS/COM later) |
 | Registry | `winreg` | Idiomatic HKCU export/import with raw value types | `windows-registry` |
-| Task Scheduler | `schtasks.exe` + XML | No COM code; the full task definition is readable | `windows` crate `ITaskService` |
-| Encryption | `argon2`, `chacha20poly1305`, `hmac`, `getrandom`, `zeroize` | RustCrypto: pure Rust, widely reviewed, no C toolchain | `age` (file format, heavier dependency tree), `ring`/`aws-lc-rs` |
+| Schedules | own thread + Win32 tray icon | Several schedules with folders, nothing left in system tools, works with an unlocked (not remembered) key | Task Scheduler (used until 0.2; one task per schedule, runs without the app), `tray-icon` crate |
+| Encryption | `argon2`, `chacha20poly1305`, `aes-gcm`, `hmac`, `getrandom`, `zeroize` | RustCrypto: pure Rust, widely reviewed, no C toolchain; two standard ciphers to choose from | `age` (file format, names not hidden, heavier dependency tree), `ring`/`aws-lc-rs` |
 | Config | `serde` + `toml` | Comments allowed, friendly to hand-editing | `serde_json`, `ron` |
 | Index | `serde_json` | Human-readable, robust | SQLite (`rusqlite`) for very large backups |
 | Paths | `directories` | Known Folders incl. redirection (OneDrive) | `dirs`, `known-folders` |

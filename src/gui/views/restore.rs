@@ -113,10 +113,11 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                                         BackupMode::Incremental => t.mode_incremental,
                                         BackupMode::Full => t.mode_full,
                                     };
+                                    let stats = info.total_stats().unwrap_or(h.stats.clone());
                                     let mut detail = format!(
                                         "{mode} · {} · {}",
-                                        lang.files(h.stats.files),
-                                        lang.bytes(h.stats.bytes)
+                                        lang.files(stats.files),
+                                        lang.bytes(stats.bytes)
                                     );
                                     if info.is_split() {
                                         detail

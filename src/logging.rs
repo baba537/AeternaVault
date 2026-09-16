@@ -88,6 +88,8 @@ pub fn init(paths: &AppPaths, console: bool) -> Logging {
     };
 
     let buffer = LogBuffer::default();
+    // The appender cleans up old files on start and complains if the folder is missing.
+    let _ = std::fs::create_dir_all(&paths.log_dir);
 
     let (file_layer, guard) = match RollingFileAppender::builder()
         .rotation(Rotation::DAILY)

@@ -5,19 +5,18 @@ is optional, and the order is open for discussion.
 
 ## Next
 
-- [ ] **Keeping and removing old backups.** Retention rules such as "all of the
-      last 7 days, one per week for 3 months, one per month forever", with a
-      preview of what would be removed. Especially useful with automatic backups.
-      Must respect `blob` references into older backups and shared encrypted blobs.
-- [ ] **Check a backup.** Re-read every stored file (or decrypt every blob) and
-      compare SHA-256, report damaged or missing files; optionally on a schedule.
-- [ ] **Browse and restore single files.** A tree view of a backup with search,
-      and "restore this file / folder" — also for encrypted backups.
 - [ ] **Volume Shadow Copy (VSS).** Consistent copies of files in use (Outlook
       PST, browser databases). Needs administrator rights; implement
-      `platform::vss::FileReader` with `IVssBackupComponents`.
-- [ ] **Notifications.** A quiet Windows toast when an automatic backup could not
-      run (e.g. passphrase not remembered for a long time).
+      `platform::vss::FileReader` with `IVssBackupComponents`. Probably as a small
+      helper started elevated only for that step.
+- [ ] **Scheduled checks.** Run the backup check automatically, e.g. once a month,
+      and report damaged or missing files.
+- [ ] **Restore single files directly** to their original place from the browse
+      view (today: copy to a folder, or restore whole folders).
+- [ ] **Quiet notifications** (Windows toasts) when an automatic backup could not
+      run for a while.
+- [ ] **Recovery sheet.** A printable page with the recovery key as text and QR
+      code, plus instructions.
 
 ## Later
 
@@ -25,35 +24,51 @@ is optional, and the order is open for discussion.
       Wi-Fi profiles (`netsh wlan export`, needs administrator rights for keys),
       default app associations (`dism /Export-DefaultAppAssociations`), printer
       settings. Community-maintained catalog updates.
-- [ ] **Owner filter.** Optionally back up only files owned by the current user
-      (`GetNamedSecurityInfoW` / NTFS owner SID).
+- [ ] **Owner filter.** Optionally back up only files owned by the current user.
 - [ ] **Compression.** Optional zstd per file (plain: `.zst` suffix; encrypted:
       before encryption), or a pack format for many small files.
 - [ ] **Encrypted pack files.** Combine small blobs into larger packs to reduce
       the number of files in cloud folders.
-- [ ] **Network destinations.** Better handling of NAS / SMB shares: credentials
-      via Windows Credential Manager, reconnect and retry.
-- [ ] **Preserve more metadata.** Attributes (read-only, hidden), creation time,
-      ACLs, alternate data streams — each optional.
-- [ ] **Faster scans.** Parallel walking (`jwalk`) and NTFS USN journal for
-      change detection on large folders.
-- [ ] **Compact index.** SQLite or compressed JSON for backups with millions of files.
-- [ ] **Tray icon** with last backup status (optional, for people who prefer it).
+- [ ] **Network destinations.** Credentials via Windows Credential Manager,
+      reconnect and retry.
+- [ ] **Preserve more metadata.** Attributes, creation time, ACLs, alternate data
+      streams — each optional.
+- [ ] **Faster scans.** Parallel walking and the NTFS USN journal.
+- [ ] **Compact index.** SQLite or compressed JSON for millions of files.
+- [ ] **Re-encrypting a vault with a new vault key** (full key rotation). Today the
+      passphrase and the recovery key can be replaced without re-encrypting; a
+      new vault key requires copying all data into a new vault.
+- [ ] **Export to a standard format** such as `age` or 7-Zip AES for sharing.
 
-## Distribution
+## Trust and distribution
 
+- [ ] External security review of the encryption format and implementation.
 - [ ] Code signing certificate (the release workflow already has an optional step).
-- [ ] `winget` manifest and/or an MSI / MSIX installer (e.g. `cargo-wix`).
+- [ ] A second maintainer with release rights.
+- [ ] Reproducible builds (pinned toolchain is in place; bit-identical output is
+      not yet verified).
+- [ ] `winget` manifest and/or an MSI / MSIX installer.
 - [ ] ARM64 Windows build.
 - [ ] More languages (French, Italian, Spanish …) — see CONTRIBUTING.md.
-- [ ] External security review of the encryption format.
+
+## Done in 0.3.0
+
+- [x] Backups view: check, browse, open files, copy out, move, delete
+- [x] Retention rules with preview
+- [x] Choice of cipher (XChaCha20-Poly1305 / AES-256-GCM) and Argon2id strength
+- [x] Encrypt only selected folders and files
+- [x] Test and replace the recovery key; save it as a file
+- [x] Open encrypted backups without restoring, by double-click or `open`
+- [x] Independent Python decryptor, byte-level format documentation
+- [x] Automatic backups run by AeternaVault (several schedules, tray, start with Windows)
+- [x] Build provenance attestation and SBOM for releases
 
 ## Done in 0.2.0
 
 - [x] Application settings catalog (folders and HKCU registry), portable paths
 - [x] Choose sub-folders and files of a source
 - [x] Encrypted backups with passphrase and recovery key
-- [x] Automatic backups via the Task Scheduler
+- [x] Automatic backups via the Task Scheduler (replaced in 0.3)
 - [x] Flatter backup folder structure
 - [x] Restore selection, program list and winget export, open-application warnings
 - [x] Interface tests, accessible labels

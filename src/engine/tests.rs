@@ -536,6 +536,54 @@ fn delete_verify_and_move_backups() {
     );
 }
 
+/// Writes encrypted sample backups for checking `tools/aeterna-decrypt.py`:
+///
+/// ```text
+/// $env:AETERNAVAULT_REFERENCE_DIR = "$env:TEMP\aeterna-reference"
+/// cargo test write_reference_vaults -- --ignored
+/// python tools/aeterna-decrypt.py "$env:TEMP\aeterna-reference\xchacha20poly1305\Vault" extract latest out
+/// ```
+#[test]
+#[ignore = "writes sample vaults for the Python decryptor"]
+fn write_reference_vaults() {
+    let root = PathBuf::from(
+        std::env::var_os("AETERNAVAULT_REFERENCE_DIR").expect("set AETERNAVAULT_REFERENCE_DIR"),
+    );
+    for (name, cipher) in [
+        ("xchacha20poly1305", Cipher::XChaCha20Poly1305),
+        ("aes256gcm", Cipher::Aes256Gcm),
+    ] {
+        let base = root.join(name);
+        let _ = fs::remove_dir_all(&base);
+        let source = base.join("Documents");
+        write(&source.join("letter.txt"), "Dear archive,");
+        write(&source.join("empty.txt"), "");
+        let big: String = (0..(3 * 1024 * 1024 + 123))
+            .map(|i| char::from(b'a' + (i % 26) as u8))
+            .collect();
+        write(&source.join("sub folder/big.txt"), &big);
+        let mut config = Config {
+            destination: base.join("Vault"),
+            sources: vec![Source::new("Documents", &source, true)],
+            ..Config::default()
+        };
+        config.advanced.save_program_list = false;
+        let created = vault::create_with(
+            &config.destination,
+            "reference passphrase",
+            vault::VaultOptions {
+                cipher,
+                kdf: KdfParams::TEST,
+            },
+            KdfParams::TEST,
+        )
+        .unwrap();
+        fs::write(base.join("recovery-key.txt"), &created.recovery_key).unwrap();
+        config.encryption.enabled = true;
+        run(&plan(&config, Some(&created.key)), Some(&created.key));
+    }
+}
+
 #[test]
 fn application_settings_with_portable_paths() {
     let (tmp, _source, mut config) = setup();

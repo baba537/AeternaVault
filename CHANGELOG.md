@@ -6,6 +6,67 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-16
+
+Managing backups, a choice of how and what to encrypt, encrypted backups that
+can be opened without restoring (and without AeternaVault), and automatic
+backups run by AeternaVault itself.
+
+### Added
+
+- **Backups view.** Every backup at the destination with its size and status:
+  - check it without restoring (plain files are hashed, encrypted data is decrypted);
+  - browse its contents with search, open single files from a temporary copy,
+    and copy chosen files or everything to a folder;
+  - move it to another location (copied and checked before the original goes);
+  - delete one or several (recycle bin where the drive has one).
+  Newer backups that still need files of a deleted one get their own copies
+  first; encrypted data no longer used by any backup is cleaned up.
+- **Retention rules:** keep the newest *n* backups and the newest of each of the
+  last days, weeks and months; preview and "remove now", or automatically after
+  every backup. Only backups of the same computer are considered.
+- **Choice of encryption method** when setting up encryption: XChaCha20-Poly1305
+  (default) or AES-256-GCM, and three Argon2id strengths for the passphrase.
+- **Encrypt only selected items:** mark folders and files with a lock in the
+  contents tree, optionally also application settings. Such backups consist of a
+  normal folder and an encrypted part with the same name and are handled as one.
+- **How it is encrypted:** an overview of cipher, key derivation, what stays
+  hidden, where the key is kept and how to get at the files without AeternaVault.
+- **Recovery key:** save it as a text file, test it, or replace it.
+- **Open encrypted backups by double-click** on `Open with AeternaVault.avault`
+  (optional file association), or `AeternaVault.exe open <folder>`: asks for the
+  passphrase and shows the backups without changing any settings.
+- `snapshots` and `restore` accept `--destination` and ask for the passphrase, so
+  backups can be restored from a copied folder on any computer.
+- `tools/aeterna-decrypt.py`: an independent Python decryptor for encrypted
+  backups, written only from the format documentation.
+- **Several automatic backups**, each for all or only some folders.
+- **Notification area icon** while automatic backups are on: open, back up now,
+  quit. Closing the window keeps AeternaVault running there (can be turned off).
+- Optional **start with Windows** (in the background).
+- Interface size setting and a "compatibility graphics" option (OpenGL).
+- Passphrase fields can show what was typed.
+
+### Changed
+
+- **Automatic backups no longer use the Windows Task Scheduler.** AeternaVault
+  runs them itself while it is open or in the notification area; the task created
+  by 0.2 is removed once and its schedule is taken over (with start with Windows).
+- A newly chosen destination gets an `AeternaVault` folder inside (can be turned off).
+- The window never opens larger than the screen; it prefers Direct3D 12 on the
+  power-saving graphics chip and falls back to OpenGL if Direct3D fails.
+- The Activity view shows only AeternaVault's own messages; libraries' warnings
+  still go to the log file.
+- The recovery key dialog is wider and confirms copying.
+- Only one window per configuration; starting AeternaVault again brings it forward.
+
+### Fixed
+
+- The list of installed programs had almost no height.
+- Configuration files saved with a byte order mark (older Notepad) could not be read.
+- Turning automatic backups on and off quickly could install and remove the
+  scheduled task several times.
+
 ## [0.2.0] - 2026-09-14
 
 Everything needed to move to a new computer, encryption for sensitive data and
@@ -79,6 +140,7 @@ second copy of important data while the project is young.
 - GitHub Actions for CI and for publishing `AeternaVault.exe` with SHA-256
   checksums on version tags.
 
-[Unreleased]: https://github.com/baba537/AeternaVault/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/baba537/AeternaVault/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/baba537/AeternaVault/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/baba537/AeternaVault/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/baba537/AeternaVault/releases/tag/v0.1.0

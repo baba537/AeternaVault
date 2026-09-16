@@ -39,13 +39,19 @@ The interface speaks **English and German** and can be switched at any time.
   different user name.
 - **Choose exactly what to keep.** Open any folder and tick or untick
   sub-folders and single files.
-- **Encryption (optional).** Protect backups with a passphrase and a recovery key
-  (Argon2id + XChaCha20-Poly1305). File names, folder structure and contents are
-  unreadable without it — well suited for cloud folders. Unchanged files are
-  never uploaded twice.
-- **Automatic backups.** One switch: every day, every week, every few hours or at
-  sign-in. Runs quietly through the Windows Task Scheduler, without a window, and
-  makes up missed backups.
+- **Encryption (optional).** Protect everything — or only the folders and files
+  you mark — with a passphrase and a recovery key. Choose XChaCha20-Poly1305 or
+  AES-256-GCM and how strongly the passphrase is protected (Argon2id). File
+  names, folder structure and contents are unreadable without it — well suited
+  for cloud folders. Unchanged files are never uploaded twice.
+- **Open encrypted backups without restoring.** Browse, open single files or copy
+  them out — in the app, by double-click on the vault folder, from the command
+  line on any computer, or with an independent Python script.
+- **Manage backups.** Check a backup without restoring, move it to another drive,
+  delete old ones, or let retention rules (days / weeks / months) tidy up.
+- **Automatic backups.** Several schedules — every day, every week, every few
+  hours or at start — each for all or some folders. AeternaVault runs them
+  quietly itself, waiting in the notification area, and makes up missed backups.
 - **Preview first (dry run).** See which files are new, changed, unchanged, no
   longer present or skipped — with search, filters and export as text or CSV.
   The preview never writes anything.
@@ -95,6 +101,12 @@ The interface speaks **English and German** and can be switched at any time.
    ```powershell
    Get-FileHash .\AeternaVault.exe -Algorithm SHA256
    ```
+   With the [GitHub CLI](https://cli.github.com/) you can also check that the file
+   was built by this repository's release workflow (build provenance):
+   ```powershell
+   gh attestation verify .\AeternaVault.exe --repo baba537/AeternaVault
+   ```
+   Each release also contains a software bill of materials (`sbom.cdx.json`).
 3. Start it. No installation, no administrator rights and no runtime libraries
    are needed.
 
@@ -119,14 +131,38 @@ Requirements: Windows 10 or 11, 64-bit.
 
 ### Automatic backups
 
-Turn on **Automatic backups** in the Backup view and choose how often. AeternaVault
-creates a task in the Windows Task Scheduler (`\AeternaVault\Automatic backup`)
-that runs `AeternaVault.exe backup --scheduled` — no window, low priority. If the
-destination drive is not connected, the run is skipped quietly; the result is
-shown the next time you open AeternaVault. Turning the switch off removes the task.
+In the Backup view, **Automatic backups → Add…** creates a schedule: every day,
+every week, every few hours or a few minutes after AeternaVault starts, for all
+ticked folders or only some of them. Each schedule has its own switch, *Run now*
+and *Edit…*.
 
-Encrypted automatic backups need the passphrase to be remembered on the computer
-(it is protected with Windows DPAPI for your account only).
+AeternaVault runs the schedules itself, with low priority. While schedules are on,
+closing the window keeps AeternaVault in the **notification area** (right-click
+the icon to back up now or quit). Turn on **Start AeternaVault quietly when I
+sign in** so backups continue after a restart. If the destination drive is not
+connected, the run is skipped and tried again later; missed backups are made up.
+
+Encrypted automatic backups need the key: remember it on the computer (protected
+with Windows DPAPI for your account only) or keep the backups unlocked while
+AeternaVault runs.
+
+> Version 0.2 used the Windows Task Scheduler. On the first start of 0.3 that task
+> is removed and its schedule is taken over.
+
+### Managing backups
+
+The **Backups** view lists every backup at the destination. Tick one to
+
+- **Browse…** its contents, open a single file (from a temporary copy — the
+  backup itself is never changed) or copy chosen files to a folder,
+- **Check** it: every stored file is read again and compared with its checksum,
+- **Copy files to…** a folder, or **Move to…** another drive (copied and checked
+  before the original is removed).
+
+Tick several to **Delete…** them. Newer backups that still need files of a
+deleted one receive their own copies first. **Keeping old backups** removes old
+backups by rules such as "the newest 3, one per day for 7 days, one per week for
+4 weeks, one per month for 12 months", with a preview.
 
 ### Moving to a new computer
 
@@ -140,13 +176,27 @@ Encrypted automatic backups need the passphrase to be remembered on the computer
 
 ### Encryption
 
+- Turn on **Encrypt backups** and choose **Encrypt everything** or **Encrypt only
+  marked folders and files** — then click the lock next to a folder or file. The
+  rest stays a normal, browsable backup.
+- When setting up, *Encryption method* offers XChaCha20-Poly1305 (default) or
+  AES-256-GCM and three strengths for protecting the passphrase.
 - The passphrase is never stored. It unlocks a random vault key; a separate
-  **recovery key** (shown once when setting up) unlocks it as well.
+  **recovery key** (shown once when setting up — copy it, print it or save it as a
+  file) unlocks it as well. *Settings → Encryption* can test it or create a new one.
 - Encrypted backups live in `<destination>\AeternaVault Encrypted\`. Please sync or
   copy the whole folder; files are shared between backups.
-- To see the contents, open **Restore**, select the backup and **Unlock…**. Restore
-  into a folder to look at the files.
-- Details of the format: [docs/ENCRYPTION.md](docs/ENCRYPTION.md).
+- **Getting at encrypted files** — without restoring:
+  - *Backups → Browse…* in AeternaVault;
+  - double-click `Open with AeternaVault.avault` inside the folder (turn on
+    *Open encrypted backups by double-click* in Settings) — this also works with
+    backups from another computer and changes no settings;
+  - on any computer, even without installing:
+    `AeternaVault.exe restore latest --destination E:\AeternaVault --to D:\Restored --yes`;
+  - without AeternaVault at all: `python tools/aeterna-decrypt.py E:\AeternaVault extract latest D:\Restored`
+    (`pip install cryptography argon2-cffi`).
+- *Settings → How the backups are encrypted* shows the cipher, key derivation and
+  where the key is kept. The exact format is in [docs/ENCRYPTION.md](docs/ENCRYPTION.md).
 
 ### What a backup looks like on disk
 
@@ -177,11 +227,15 @@ AeternaVault.exe backup --dry-run --csv plan.csv
 AeternaVault.exe snapshots                 # list backups
 AeternaVault.exe restore latest --to D:\Restored --dry-run
 AeternaVault.exe restore latest --to D:\Restored --yes
+AeternaVault.exe snapshots --destination E:\AeternaVault        # backups in any folder
+AeternaVault.exe restore latest --destination E:\AeternaVault --to D:\Restored --yes
+AeternaVault.exe open E:\AeternaVault      # browse in a window, settings stay unchanged
 AeternaVault.exe paths                     # where settings and logs are stored
+AeternaVault.exe --background              # start in the notification area
 ```
 
-Encrypted backups use the key remembered on the computer, or the passphrase from
-the environment variable `AETERNAVAULT_PASSPHRASE`.
+Encrypted backups use the key remembered on the computer, the passphrase from the
+environment variable `AETERNAVAULT_PASSPHRASE`, or ask for it.
 
 Exit codes: `0` success, `1` error, `2` completed with notes or confirmation missing.
 
@@ -192,7 +246,9 @@ Exit codes: `0` success, `1` error, `2` completed with notes or confirmation mis
 | Configuration | `%APPDATA%\AeternaVault\config.toml` |
 | Own application catalog entries | `%APPDATA%\AeternaVault\apps.toml` |
 | Remembered vault keys (DPAPI) | `%APPDATA%\AeternaVault\keys\` |
-| Result of the last automatic backup | `%APPDATA%\AeternaVault\state.json` |
+| When schedules last ran | `%APPDATA%\AeternaVault\state.json` |
+| Start with Windows (optional) | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` → `AeternaVault` |
+| Double-click association (optional) | `HKCU\Software\Classes\.avault` |
 | Logs (14 days) | `%LOCALAPPDATA%\AeternaVault\logs\` |
 | Portable mode | put an `AeternaVault.toml` next to the EXE |
 | Custom location | set the environment variable `AETERNAVAULT_HOME` |
@@ -206,17 +262,34 @@ destination = 'D:\AeternaVault\Backups'
 mode = "incremental"       # or "full"
 exclude = ["Thumbs.db", "desktop.ini", "~$*", "*.tmp"]
 
+interface_scale = 100      # percent
+
 [encryption]
 enabled = false
+scope = "everything"       # or "selected" (with encrypt_paths per source)
+applications = true        # with "selected": encrypt application settings
 
-[schedule]
+[retention]
+enabled = false
+keep_last = 3
+keep_daily = 7
+keep_weekly = 4
+keep_monthly = 12
+
+[background]
+keep_running = true        # stay in the notification area while schedules are on
+
+[[schedule]]
+id = "a1b2c3d4"
 enabled = true
-frequency = "daily"        # "daily", "weekly", "hourly", "at-logon"
+frequency = "daily"        # "daily", "weekly", "hourly", "at-start"
 time = "20:00"
 weekday = "sunday"
 every_hours = 4
 catch_up = true
 only_on_ac_power = false
+all_folders = true
+applications = true
 
 [advanced]
 skip_online_only_files = true
@@ -225,12 +298,15 @@ confirm_before_start = true
 verify_on_restore = true
 restore_conflict = "replace-changed"   # "keep-existing", "keep-newer"
 save_program_list = true
+destination_app_folder = true          # create "AeternaVault" in a chosen folder
+compatibility_graphics = false         # OpenGL instead of Direct3D 12
 
 [[source]]
 name = "Desktop"
 path = 'C:\Users\Anna\Desktop'
 enabled = true
 exclude_paths = ["Old screenshots"]
+encrypt_paths = ["Taxes"]              # with scope = "selected"
 
 [[application]]
 id = "firefox"
@@ -255,11 +331,23 @@ exclude = ["cache", "*.log"]
 
 ## Current limitations
 
-AeternaVault is a young project. Please keep a second copy of data that matters.
+AeternaVault is a young project, maintained by one person. Please keep a second
+copy of data that matters.
 
+- **No external security audit yet.** The encryption uses standard building
+  blocks and is documented byte by byte; an independent implementation
+  (`tools/aeterna-decrypt.py`) reads it. Reviews are very welcome — see
+  [SECURITY.md](SECURITY.md).
+- Release executables are not code-signed; they come with SHA-256 checksums, a
+  build provenance attestation and an SBOM.
 - Files that another program locks exclusively (e.g. an open Outlook PST) are
   reported and skipped — Volume Shadow Copy support is planned.
-- Old backups are not removed automatically yet.
+- Automatic backups only run while AeternaVault is running (in the notification
+  area or started with Windows).
+- The vault key of an encrypted destination cannot be rotated in place; the
+  passphrase and the recovery key can.
+- There is no bootable rescue medium. The portable EXE works on a fresh Windows
+  installation; keep a copy next to your backups if you like.
 - Browser passwords and some app databases are protected by the Windows account;
   after a reinstall of Windows they may need the application's own sync.
 - Registry settings are limited to `HKEY_CURRENT_USER`.
@@ -279,8 +367,8 @@ cargo test                     # engine, encryption and interface tests
 cargo build --release          # target\release\AeternaVault.exe
 ```
 
-Optional: a smaller executable with the OpenGL renderer instead of wgpu
-(Direct3D 12):
+Both renderers are built in: Direct3D 12 (wgpu) with OpenGL as fallback. A
+smaller executable with only the OpenGL renderer:
 
 ```powershell
 cargo build --release --no-default-features --features glow
@@ -309,14 +397,19 @@ are set.
 src/
   main.rs, cli.rs        entry point and command line
   config.rs, paths.rs    settings file and locations
-  state.rs               result of automatic backups
+  state.rs               when schedules last ran
   i18n.rs                English and German texts
+  automatic/             schedules: timing, background service, unattended runs
   engine/                scan, selection, plan (preview), backup, restore,
+                         verify, retention, manage (delete, move, extract),
                          index format, encryption (crypto, vault)
   platform/              Windows specifics, application catalog (apps.toml),
-                         registry, portable paths, Task Scheduler, VSS interface
-  gui/                   state, actions, dialogs, theme, widgets, views, tests
+                         registry, portable paths, tray icon, single instance,
+                         autostart, file association, VSS interface
+  gui/                   state, actions, background, manage, dialogs, theme,
+                         widgets, views, tests
 assets/icon/             application icon (generated by tools/make-icon.ps1)
+tools/                   icon generator, independent Python decryptor
 docs/                    architecture, encryption, design, roadmap, screenshots
 .github/workflows/       CI and release
 ```
