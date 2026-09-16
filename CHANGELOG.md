@@ -6,7 +6,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-09-17
+## [0.4.0] - 2026-09-16
 
 A calmer window: everything that is set once moved to the settings, automatic
 backups got their own tab, and the activity history is kept.
