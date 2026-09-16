@@ -10,10 +10,11 @@ describes the current state and the reasons behind it. None of it is set in ston
 ```text
 src/
 ├── main.rs            entry point: GUI without arguments, CLI with a subcommand
-├── cli.rs             command line (clap): backup, snapshots, restore [--destination], open, paths
+├── cli.rs             command line (clap): backup, snapshots, restore [--destination], open, add, paths (docs/CLI.md)
 ├── config.rs          TOML configuration with defaults for every field
 ├── paths.rs           where config and logs live (standard, portable, env override)
 ├── state.rs           when each schedule last ran (shared by window and service)
+├── history.rs         activity history (history.jsonl), written by window, service and CLI
 ├── i18n.rs            all user-facing texts, English and German
 ├── logging.rs         tracing: rotating log file + in-memory buffer for the GUI
 ├── error.rs           engine error type
@@ -30,12 +31,13 @@ src/
 │   ├── manifest.rs    on-disk format of a backup (read-only)
 │   ├── plan.rs        preview / dry run: BackupPlan, RestorePlan (read-only)
 │   ├── verify.rs      check a backup without restoring (read-only)
-│   ├── retention.rs   which old backups the rules would remove (read-only)
+│   ├── retention.rs   which old backups the rules would remove, and when (read-only)
 │   ├── manage.rs      delete (with re-homing), move, extract, prune vault blobs
 │   ├── backup.rs      executes a BackupPlan (plain part, encrypted part, or both)
 │   ├── restore.rs     executes a RestorePlan (files and registry)
 │   ├── fsops.rs       the only place that writes files; destination lock
 │   ├── crypto.rs      Argon2id, XChaCha20-Poly1305 / AES-256-GCM streams, key slots
+│   ├── passphrase.rs  passphrase rating (length, kinds of characters, patterns)
 │   ├── vault.rs       encrypted vault on disk, remembered keys
 │   ├── export.rs      preview export as text / CSV
 │   └── tests.rs       end-to-end tests on temporary folders
@@ -43,13 +45,14 @@ src/
 │   ├── mod.rs         OS helpers with fallbacks (drives, free space, DPAPI, processes)
 │   ├── windows.rs     a few Win32 calls via windows-sys
 │   ├── apps.rs        application catalog loader, installed programs, winget export
-│   ├── apps.toml      the built-in catalog (63 applications and Windows settings)
+│   ├── apps.toml      the built-in catalog (65 applications and Windows settings)
 │   ├── known_paths.rs {APPDATA}-style portable paths, profile remapping
 │   ├── registry.rs    HKCU export/import, .reg files
 │   ├── scheduler.rs   removes the Task Scheduler entry of 0.2
 │   ├── tray.rs        notification area icon (Shell_NotifyIconW on its own thread)
 │   ├── instance.rs    one window per configuration, activating the running one
-│   ├── autostart.rs   HKCU Run entry for "start with Windows"
+│   ├── autostart.rs   HKCU Run entry, switched on/off via StartupApproved
+│   ├── context_menu.rs  "Back up with AeternaVault" for folders; hand-over to the window
 │   ├── file_association.rs  .avault double-click (HKCU\Software\Classes)
 │   └── vss.rs         FileReader interface; Volume Shadow Copy comes later
 └── gui/
@@ -62,7 +65,7 @@ src/
     ├── widgets.rs     cards, buttons, toggle, section titles, logo, progress line
     ├── tasks.rs       worker threads with progress and cancellation
     ├── tests.rs       interface tests (egui_kittest) and screenshot rendering
-    └── views/         backup, restore, backups, browse, preview, working/done, apps, settings, activity
+    └── views/         backup, restore, backups, jobs, browse, preview, working/done, apps, settings, activity
 ```
 
 ## Data flow
@@ -135,8 +138,8 @@ priority. Occurrences before a schedule was switched on (`armed_at` in
 `state.json`) are ignored; missed ones are made up once; a run skipped because
 the drive was missing is retried every 15 minutes. The service never depends on
 egui frames: while the window is hidden, eframe only calls `App::logic`, which
-handles tray and service events. Closing the window hides it while schedules are
-on; the tray icon lives on its own Win32 thread. A named mutex keeps one
+handles tray and service events. With "keep running" on, closing the window
+hides it; the tray icon lives on its own Win32 thread. A named mutex keeps one
 instance per configuration, and a second start posts a message to the tray
 window of the running one. A lock file in the destination prevents two backups
 (window, service, another computer) from writing at once.

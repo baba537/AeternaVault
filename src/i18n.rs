@@ -593,6 +593,15 @@ impl Lang {
         }
     }
 
+    /// "XChaCha20-Poly1305 · Standard" (folded choice in the settings).
+    pub fn method_summary(
+        self,
+        cipher: crate::engine::crypto::Cipher,
+        kdf: crate::engine::crypto::KdfParams,
+    ) -> String {
+        format!("{} · {}", cipher.display_name(), self.kdf_name(kdf))
+    }
+
     pub fn method_fixed(self, cipher: &str) -> String {
         match self {
             Lang::En => format!(
@@ -1774,6 +1783,7 @@ pub struct Tr {
     pub history_hint: &'static str,
     pub technical_log_hint: &'static str,
     pub history_empty: &'static str,
+    pub filter_activity: &'static str,
     pub explorer_menu: &'static str,
     pub explorer_menu_hint: &'static str,
     pub explorer_menu_label: &'static str,
@@ -2181,6 +2191,7 @@ pub static EN: Tr = Tr {
     history_hint: "Everything AeternaVault did on this computer, also in earlier sessions.",
     technical_log_hint: "Detailed messages of this session. Older ones are in the log folder.",
     history_empty: "Nothing has happened yet.",
+    filter_activity: "Search…",
     explorer_menu: "Show “Back up with AeternaVault” when right-clicking a folder in Explorer",
     explorer_menu_hint: "The folder is added to the list of folders to back up. On Windows 11 the entry is under “Show more options”.",
     explorer_menu_label: "Back up with AeternaVault",
@@ -2588,6 +2599,7 @@ pub static DE: Tr = Tr {
     history_hint: "Alles, was AeternaVault auf diesem Computer getan hat, auch in früheren Sitzungen.",
     technical_log_hint: "Ausführliche Meldungen dieser Sitzung. Ältere stehen im Log-Ordner.",
     history_empty: "Noch ist nichts passiert.",
+    filter_activity: "Suchen…",
     explorer_menu: "„Mit AeternaVault sichern“ im Explorer-Kontextmenü von Ordnern anzeigen",
     explorer_menu_hint: "Der Ordner wird zur Liste der zu sichernden Ordner hinzugefügt. Unter Windows 11 steht der Eintrag unter „Weitere Optionen anzeigen“.",
     explorer_menu_label: "Mit AeternaVault sichern",

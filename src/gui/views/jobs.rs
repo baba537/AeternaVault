@@ -58,7 +58,11 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
 
     for schedule in &app.config.schedules {
         ui.add_space(10.0);
-        let label = crate::automatic::describe(schedule, &app.config, lang);
+        let label = if schedule.name.trim().is_empty() {
+            crate::automatic::when_text(schedule, lang)
+        } else {
+            schedule.name.trim().to_string()
+        };
         let state = app.state.schedules.get(&schedule.id);
         let last = state.and_then(|s| s.last_run.as_ref());
         Frame::new()

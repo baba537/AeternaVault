@@ -590,7 +590,11 @@ fn strength_meter(ui: &mut Ui, passphrase: &str, lang: crate::i18n::Lang) {
                 ui.add_space(6.0);
                 ui.label(egui::RichText::new(label).size(12.5).color(color));
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new("ⓘ").size(12.5).color(p.text_secondary));
+                ui.label(
+                    egui::RichText::new("(?)")
+                        .size(12.5)
+                        .color(p.text_secondary),
+                );
             }
         })
         .response;

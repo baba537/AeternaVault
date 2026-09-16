@@ -54,7 +54,7 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
         ui.add_space(6.0);
         ui.add(
             egui::TextEdit::singleline(&mut filter)
-                .hint_text(t.filter_hint)
+                .hint_text(t.filter_activity)
                 .desired_width(280.0),
         );
         ui.add_space(8.0);
@@ -146,7 +146,7 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                         );
                         let color = match severity {
                             Severity::Good => p.success,
-                            Severity::Neutral => p.accent,
+                            Severity::Neutral => p.text_secondary,
                             Severity::Warning => p.warning,
                             Severity::Problem => p.error,
                         };

@@ -14,6 +14,7 @@ Commands:
   snapshots  List the backups at the destination
   restore    Restore a backup
   open       Browse backups in a window, without changing any settings
+  add        Add a folder to the folders to back up and show the window
   paths      Show where configuration and logs are stored
   help       Show help for a command
 ```
@@ -122,6 +123,17 @@ is what a double-click on `Open with AeternaVault.avault` runs.
 ```powershell
 AeternaVault.exe open E:\AeternaVault
 AeternaVault.exe open "E:\AeternaVault\AeternaVault Encrypted\Open with AeternaVault.avault"
+```
+
+## `add`
+
+Adds a folder to the list of folders to back up and shows the window (or brings
+the running one to the front, which then shows the folder). This is what "Back up
+with AeternaVault" in the Explorer menu of folders runs; that menu entry can be
+switched on in *Settings → Startup and background*.
+
+```powershell
+AeternaVault.exe add D:\Projects
 ```
 
 ## `paths`

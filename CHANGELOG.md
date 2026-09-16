@@ -6,6 +6,58 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-17
+
+A calmer window: everything that is set once moved to the settings, automatic
+backups got their own tab, and the activity history is kept.
+
+### Added
+
+- **Backup jobs tab.** Automatic backups are set up and watched in their own view.
+  After a backup from the window, *Repeat automatically…* turns it into a job.
+  A job can **check the backup afterwards** (every file is read again and
+  compared with its checksum).
+- **Activity history across sessions:** backups, restores, jobs created, changed,
+  switched or removed, backups deleted, moved, copied out or checked, encryption
+  and destination changes — also from the command line and the background.
+  Searchable; the technical log of the session is one click away.
+- **When backups will be removed:** with the rules for keeping old backups on, a
+  forecast shows the expected day for each backup, based on the switched-on jobs.
+- **"Back up with AeternaVault" in the Explorer menu of folders** (optional,
+  Settings): adds the folder to the list, also while AeternaVault is running.
+  New command `AeternaVault.exe add <folder>`.
+- **Catalog:** Outlook data files (PST) and the configuration of cloud, container
+  and WSL tools (AWS, Azure, Kubernetes, Docker, `.wslconfig`); both off by default.
+- **[Command-line documentation](docs/CLI.md).**
+
+### Changed
+
+- **Settings** now hold the destination (with the *AeternaVault* folder option),
+  the kind of backup, what is encrypted and with which method, starting with
+  Windows, the notification area and *only when plugged in* (now one setting for
+  all jobs). The Backup view keeps the folders, applications, the destination at
+  a glance and the encryption switch.
+- **Passphrases:** no minimum length any more. The rating shows *weak*, *fair* or
+  *good* following common guidance — length (12, better 16 characters), kinds of
+  characters, no keyboard rows, sequences, dates, common words or user and
+  computer names — with the criteria in a tooltip.
+- **Start with Windows** stays listed in Windows' startup apps; the setting
+  switches the entry on or off exactly like Task Manager does.
+- **Open encrypted backups by double-click** is on by default.
+- **Notices** appear in their own strip at the very top and disappear after a few
+  seconds (pointing at one keeps it).
+
+### Fixed
+
+- *Keep running in the notification area* only worked while at least one
+  automatic backup was switched on.
+- The links to `docs/ENCRYPTION.md` and `tools/aeterna-decrypt.py` did not open.
+- Browsing a backup in a small window pushed the buttons out of sight; the
+  window opened by double-click can now be closed with its own button.
+- With encryption on, a deleted destination folder (and with it the vault) made
+  every backup fail; AeternaVault now checks before each backup and offers to set
+  up encryption again. Plain destination folders are created again as before.
+
 ## [0.3.0] - 2026-09-16
 
 Managing backups, a choice of how and what to encrypt, encrypted backups that
@@ -140,7 +192,8 @@ second copy of important data while the project is young.
 - GitHub Actions for CI and for publishing `AeternaVault.exe` with SHA-256
   checksums on version tags.
 
-[Unreleased]: https://github.com/baba537/AeternaVault/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/baba537/AeternaVault/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/baba537/AeternaVault/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/baba537/AeternaVault/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/baba537/AeternaVault/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/baba537/AeternaVault/releases/tag/v0.1.0

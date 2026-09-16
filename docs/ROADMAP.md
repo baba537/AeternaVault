@@ -9,8 +9,8 @@ is optional, and the order is open for discussion.
       PST, browser databases). Needs administrator rights; implement
       `platform::vss::FileReader` with `IVssBackupComponents`. Probably as a small
       helper started elevated only for that step.
-- [ ] **Scheduled checks.** Run the backup check automatically, e.g. once a month,
-      and report damaged or missing files.
+- [ ] **Scheduled checks of older backups.** Jobs can check the backup they
+      just made; checking all backups e.g. once a month is still open.
 - [ ] **Restore single files directly** to their original place from the browse
       view (today: copy to a folder, or restore whole folders).
 - [ ] **Quiet notifications** (Windows toasts) when an automatic backup could not
@@ -40,6 +40,23 @@ is optional, and the order is open for discussion.
       new vault key requires copying all data into a new vault.
 - [ ] **Export to a standard format** such as `age` or 7-Zip AES for sharing.
 
+### Considered and not planned for now
+
+- **Several destinations at once** (local, USB, NAS, cloud). Today all jobs use
+  the one destination; a realistic next step is an optional destination per job. Cloud APIs (S3, OneDrive API) would add accounts and credentials; syncing a
+  local cloud folder already works.
+- **Databases and virtual machines** (MySQL, PostgreSQL, MongoDB, Hyper-V,
+  VirtualBox, VMware, Docker images). Consistent copies need the database's own
+  dump tool or a snapshot of the running machine; copying the files while they
+  are in use gives broken backups. Recommended: let the tool write a dump into a
+  folder and back up that folder. SQLite files that are not in use are fine.
+- **Compliance labels** (GDPR, HIPAA, ISO 27001). These certify organisations and
+  their processes, not a tool. AeternaVault supports them with encryption,
+  local-only data, retention rules and the activity history.
+- **Game saves of Epic and GOG.** Saves live in per-game folders; most are in
+  *Saved Games* or *Documents\My Games*, which the catalog already covers, or in
+  the launchers' cloud sync.
+
 ## Trust and distribution
 
 - [ ] External security review of the encryption format and implementation.
@@ -50,6 +67,17 @@ is optional, and the order is open for discussion.
 - [ ] `winget` manifest and/or an MSI / MSIX installer.
 - [ ] ARM64 Windows build.
 - [ ] More languages (French, Italian, Spanish …) — see CONTRIBUTING.md.
+
+## Done in 0.4.0
+
+- [x] Calmer window: one-time settings in Settings, Backup jobs tab
+- [x] Activity history across sessions
+- [x] Retention forecast
+- [x] Passphrase rating by length, kinds of characters and patterns; no minimum
+- [x] Start with Windows via StartupApproved; double-click on by default
+- [x] Explorer menu "Back up with AeternaVault"; check a backup after a job
+- [x] Catalog: Outlook PST, cloud/container/WSL configuration
+- [x] Command-line documentation
 
 ## Done in 0.3.0
 

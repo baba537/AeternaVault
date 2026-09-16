@@ -48,10 +48,13 @@ The interface speaks **English and German** and can be switched at any time.
   them out — in the app, by double-click on the vault folder, from the command
   line on any computer, or with an independent Python script.
 - **Manage backups.** Check a backup without restoring, move it to another drive,
-  delete old ones, or let retention rules (days / weeks / months) tidy up.
-- **Automatic backups.** Several schedules — every day, every week, every few
-  hours or at start — each for all or some folders. AeternaVault runs them
-  quietly itself, waiting in the notification area, and makes up missed backups.
+  delete old ones, or let retention rules (days / weeks / months) tidy up — with
+  a forecast of when each backup will be removed.
+- **Backup jobs.** Several automatic backups — every day, every week, every few
+  hours or at start — each for all or some folders, optionally checked
+  afterwards. AeternaVault runs them quietly itself, waiting in the notification
+  area, and makes up missed backups.
+- **Activity history.** Everything AeternaVault did, kept across sessions.
 - **Preview first (dry run).** See which files are new, changed, unchanged, no
   longer present or skipped — with search, filters and export as text or CSV.
   The preview never writes anything.
@@ -87,11 +90,19 @@ The interface speaks **English and German** and can be switched at any time.
   </tr>
   <tr>
     <td><img src="docs/screenshots/backups.png" alt="Backups view with check, browse, copy, move and delete actions and retention rules"></td>
-    <td><img src="docs/screenshots/overview-de-light.png" alt="Main window in light appearance with German interface"></td>
+    <td><img src="docs/screenshots/jobs.png" alt="Backup jobs view with two automatic backups and their next run"></td>
   </tr>
   <tr>
     <td align="center"><sub>Managing backups</sub></td>
+    <td align="center"><sub>Backup jobs</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/overview-de-light.png" alt="Main window in light appearance with German interface"></td>
+    <td></td>
+  </tr>
+  <tr>
     <td align="center"><sub>Light appearance, German interface</sub></td>
+    <td></td>
   </tr>
 </table>
 
@@ -133,16 +144,21 @@ Requirements: Windows 10 or 11, 64-bit.
 
 ### Automatic backups
 
-In the Backup view, **Automatic backups → Add…** creates a schedule: every day,
-every week, every few hours or a few minutes after AeternaVault starts, for all
-ticked folders or only some of them. Each schedule has its own switch, *Run now*
-and *Edit…*.
+In **Backup jobs → Add…** (or *Repeat automatically…* after a backup) you create
+a job: every day, every week, every few hours or a few minutes after AeternaVault
+starts, for all ticked folders or only some of them, optionally checked
+afterwards. Each job has its own switch, *Run now* and *Edit…*.
 
-AeternaVault runs the schedules itself, with low priority. While schedules are on,
-closing the window keeps AeternaVault in the **notification area** (right-click
-the icon to back up now or quit). Turn on **Start AeternaVault quietly when I
-sign in** so backups continue after a restart. If the destination drive is not
-connected, the run is skipped and tried again later; missed backups are made up.
+AeternaVault runs the jobs itself, with low priority. Closing the window keeps
+AeternaVault in the **notification area** (right-click the icon to back up now or
+quit). In **Settings → Startup and background**, turn on **Start AeternaVault
+quietly when I sign in** so backups continue after a restart — AeternaVault stays
+listed in Windows' startup apps, and this switch turns the entry on or off. If
+the destination drive is not connected, the run is skipped and tried again
+later; missed backups are made up. *Only when plugged in* lets laptops wait for
+mains power.
+
+Everything that happens is listed in **Activity**, also after a restart.
 
 Encrypted automatic backups need the key: remember it on the computer (protected
 with Windows DPAPI for your account only) or keep the backups unlocked while
@@ -164,7 +180,8 @@ The **Backups** view lists every backup at the destination. Tick one to
 Tick several to **Delete…** them. Newer backups that still need files of a
 deleted one receive their own copies first. **Keeping old backups** removes old
 backups by rules such as "the newest 3, one per day for 7 days, one per week for
-4 weeks, one per month for 12 months", with a preview.
+4 weeks, one per month for 12 months", with a preview and a forecast of when
+each backup will be removed.
 
 ### Moving to a new computer
 
@@ -178,11 +195,14 @@ backups by rules such as "the newest 3, one per day for 7 days, one per week for
 
 ### Encryption
 
-- Turn on **Encrypt backups** and choose **Encrypt everything** or **Encrypt only
-  marked folders and files** — then click the lock next to a folder or file. The
-  rest stays a normal, browsable backup.
-- When setting up, *Encryption method* offers XChaCha20-Poly1305 (default) or
-  AES-256-GCM and three strengths for protecting the passphrase.
+- Turn on **Encrypt backups** in the Backup view. In **Settings → Encryption**
+  choose **Encrypt everything** or **Encrypt only marked folders and files** —
+  then click the lock next to a folder or file. The rest stays a normal,
+  browsable backup.
+- Before setting up, *Encryption method* in the settings offers
+  XChaCha20-Poly1305 (default) or AES-256-GCM and three strengths for protecting
+  the passphrase. Any passphrase is accepted; a rating (weak / fair / good) shows
+  how well it follows common guidance.
 - The passphrase is never stored. It unlocks a random vault key; a separate
   **recovery key** (shown once when setting up — copy it, print it or save it as a
   file) unlocks it as well. *Settings → Encryption* can test it or create a new one.
@@ -190,8 +210,8 @@ backups by rules such as "the newest 3, one per day for 7 days, one per week for
   copy the whole folder; files are shared between backups.
 - **Getting at encrypted files** — without restoring:
   - *Backups → Browse…* in AeternaVault;
-  - double-click `Open with AeternaVault.avault` inside the folder (turn on
-    *Open encrypted backups by double-click* in Settings) — this also works with
+  - double-click `Open with AeternaVault.avault` inside the folder (*Open
+    encrypted backups by double-click* is on by default) — this also works with
     backups from another computer and changes no settings;
   - on any computer, even without installing:
     `AeternaVault.exe restore latest --destination E:\AeternaVault --to D:\Restored --yes`;
@@ -222,6 +242,8 @@ imported with a double-click.
 
 ### Command line
 
+All commands, options and exit codes are described in [docs/CLI.md](docs/CLI.md).
+
 ```powershell
 AeternaVault.exe backup                    # back up with the saved settings
 AeternaVault.exe backup --dry-run          # only show what would happen
@@ -232,6 +254,7 @@ AeternaVault.exe restore latest --to D:\Restored --yes
 AeternaVault.exe snapshots --destination E:\AeternaVault        # backups in any folder
 AeternaVault.exe restore latest --destination E:\AeternaVault --to D:\Restored --yes
 AeternaVault.exe open E:\AeternaVault      # browse in a window, settings stay unchanged
+AeternaVault.exe add D:\Projects           # add a folder (used by the Explorer menu)
 AeternaVault.exe paths                     # where settings and logs are stored
 AeternaVault.exe --background              # start in the notification area
 ```
@@ -248,9 +271,11 @@ Exit codes: `0` success, `1` error, `2` completed with notes or confirmation mis
 | Configuration | `%APPDATA%\AeternaVault\config.toml` |
 | Own application catalog entries | `%APPDATA%\AeternaVault\apps.toml` |
 | Remembered vault keys (DPAPI) | `%APPDATA%\AeternaVault\keys\` |
-| When schedules last ran | `%APPDATA%\AeternaVault\state.json` |
-| Start with Windows (optional) | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` → `AeternaVault` |
-| Double-click association (optional) | `HKCU\Software\Classes\.avault` |
+| When jobs last ran | `%APPDATA%\AeternaVault\state.json` |
+| Activity history | `%APPDATA%\AeternaVault\history.jsonl` |
+| Start with Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` → `AeternaVault` (always listed; on/off in `…\Explorer\StartupApproved\Run`) |
+| Double-click association | `HKCU\Software\Classes\.avault` |
+| Explorer menu (optional) | `HKCU\Software\Classes\Directory\shell\AeternaVault` |
 | Logs (14 days) | `%LOCALAPPDATA%\AeternaVault\logs\` |
 | Portable mode | put an `AeternaVault.toml` next to the EXE |
 | Custom location | set the environment variable `AETERNAVAULT_HOME` |
@@ -419,6 +444,7 @@ docs/                    architecture, encryption, design, roadmap, screenshots
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md) — modules, data flow, preview guarantees, crate choices and alternatives
+- [Command line](docs/CLI.md) — every command, option, environment variable and exit code
 - [Encryption](docs/ENCRYPTION.md) — how encrypted backups are stored and protected
 - [Design](docs/DESIGN.md) — colors, typography, layout, voice
 - [Roadmap](docs/ROADMAP.md) — ideas for the next versions

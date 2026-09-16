@@ -447,7 +447,7 @@ fn render_readme_screenshots() {
     };
 
     // 1. Backup view, full height, with the Desktop contents tree open.
-    let mut h = build(1800.0, &|config| {
+    let mut h = build(1300.0, &|config| {
         config.language = LanguageSetting::En;
         config.appearance = crate::config::Appearance::Dark;
         if config.schedules.is_empty() {
@@ -527,6 +527,76 @@ fn render_readme_screenshots() {
     h.state_mut().view = View::Jobs;
     settle(&mut h);
     save(&mut h, "jobs");
+
+    // 4c'. Retention forecast and the activity history.
+    let mut h = build(1400.0, &|config| {
+        config.language = LanguageSetting::En;
+        config.retention.enabled = true;
+        config.schedules = demo_schedules(config);
+    });
+    h.state_mut().view = View::Backups;
+    settle(&mut h);
+    save(&mut h, "check-retention-forecast");
+
+    let mut h = build(900.0, &|config| config.language = LanguageSetting::De);
+    {
+        use crate::history::{Entry, Event, Outcome};
+        let at = |days: i64, hours: i64| {
+            chrono::Utc::now() - chrono::Duration::days(days) - chrono::Duration::hours(hours)
+        };
+        h.state_mut().history = vec![
+            Entry {
+                at: at(2, 3),
+                event: Event::JobCreated {
+                    job: "Jeden Tag um 20:00 · Alles".into(),
+                },
+            },
+            Entry {
+                at: at(1, 5),
+                event: Event::Backup {
+                    job: "Jeden Tag um 20:00 · Alles".into(),
+                    command_line: false,
+                    outcome: Outcome::Complete,
+                    files: 1284,
+                    bytes: 3_400_000_000,
+                    snapshot: "2026-09-15 20-00".into(),
+                    message: String::new(),
+                },
+            },
+            Entry {
+                at: at(0, 4),
+                event: Event::Backup {
+                    job: "Jeden Tag um 20:00 · Alles".into(),
+                    command_line: false,
+                    outcome: Outcome::Skipped,
+                    files: 0,
+                    bytes: 0,
+                    snapshot: String::new(),
+                    message: String::new(),
+                },
+            },
+            Entry {
+                at: at(0, 2),
+                event: Event::BackupsDeleted {
+                    snapshots: vec!["2026-08-01 20-00".into(), "2026-08-02 20-00".into()],
+                    by_rules: true,
+                    message: String::new(),
+                },
+            },
+            Entry {
+                at: at(0, 1),
+                event: Event::Verified {
+                    snapshot: "2026-09-15 20-00".into(),
+                    files: 1284,
+                    damaged: 0,
+                    missing: 0,
+                },
+            },
+        ];
+    }
+    h.state_mut().view = View::Activity;
+    settle(&mut h);
+    save(&mut h, "check-activity");
 
     // 4d. Settings.
     let mut h = build(2200.0, &|config| config.language = LanguageSetting::En);

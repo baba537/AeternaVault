@@ -422,7 +422,15 @@ fn encryption_card(app: &mut AeternaApp, ui: &mut Ui) {
                 );
             }
             None => {
-                crate::gui::dialogs::encryption_method(ui, &mut app.config.encryption, lang);
+                let current = app.config.encryption.vault_options();
+                egui::CollapsingHeader::new(
+                    egui::RichText::new(lang.method_summary(current.cipher, current.kdf))
+                        .size(13.5),
+                )
+                .id_salt("encryption-method")
+                .show(ui, |ui| {
+                    crate::gui::dialogs::encryption_method(ui, &mut app.config.encryption, lang);
+                });
             }
         }
         if app.config.encryption != before {
