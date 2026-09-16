@@ -165,6 +165,7 @@ pub enum View {
     Backup,
     Restore,
     Backups,
+    Jobs,
     Apps,
     Settings,
     Activity,
@@ -209,11 +210,34 @@ pub struct ManageUi {
     /// Qualified ids of the ticked backups.
     pub checked: HashSet<String>,
     pub extract_target: Option<PathBuf>,
+    /// The backup a running check, move or copy works on, and where to (for the history).
+    pub current: Option<(String, PathBuf)>,
+    /// Cached forecast of the retention rules: (input fingerprint, forecast).
+    pub forecast: Option<(u64, std::rc::Rc<RetentionForecast>)>,
+}
+
+/// When each backup is expected to be removed by the retention rules.
+pub struct RetentionForecast {
+    pub removals: Vec<(String, crate::engine::retention::Removal)>,
+    /// No automatic backup is switched on, so one backup a day is assumed.
+    pub assumed_daily: bool,
 }
 
 pub struct Notice {
     pub kind: NoticeKind,
     pub text: String,
+    /// When it disappears on its own; pointing at it holds it.
+    pub until: Instant,
+}
+
+impl Notice {
+    fn lifetime(kind: &NoticeKind) -> std::time::Duration {
+        std::time::Duration::from_secs(match kind {
+            NoticeKind::Info | NoticeKind::Success => 6,
+            NoticeKind::Warning => 10,
+            NoticeKind::Error => 15,
+        })
+    }
 }
 
 /// Folder path with (bytes, files), or `None` if the folder is missing.
@@ -346,6 +370,8 @@ pub struct AeternaApp {
     pub pending: Option<Pending>,
     pub notices: Vec<Notice>,
     pub log: LogBuffer,
+    /// The activity history, oldest first (see [`crate::history`]).
+    pub history: Vec<crate::history::Entry>,
     pub computer: String,
 
     pub sizes: HashMap<PathBuf, Option<(u64, u64)>>,
@@ -397,6 +423,7 @@ impl AeternaApp {
             pending: None,
             notices: Vec::new(),
             log,
+            history: Vec::new(),
             computer: platform::computer_name(),
             sizes: HashMap::new(),
             sizes_job: None,
@@ -436,6 +463,7 @@ impl AeternaApp {
                 state.acknowledged_at = Some(chrono::Utc::now());
             });
         }
+        app.history = crate::history::load(&app.paths.config_file);
         app.refresh_vault();
         app.refresh_sizes(ctx);
         app.refresh_snapshots(ctx);
@@ -461,10 +489,20 @@ impl AeternaApp {
     pub fn notify(&mut self, kind: NoticeKind, text: impl Into<String>) {
         let text = text.into();
         self.notices.retain(|n| n.text != text);
-        self.notices.push(Notice { kind, text });
+        let until = Instant::now() + Notice::lifetime(&kind);
+        self.notices.push(Notice { kind, text, until });
         if self.notices.len() > 3 {
             self.notices.remove(0);
         }
+    }
+
+    /// Notes something in the activity history (not while browsing other backups).
+    pub fn record(&mut self, event: crate::history::Event) {
+        if self.viewer.is_some() {
+            return;
+        }
+        let entry = crate::history::record(&self.paths.config_file, event);
+        self.history.push(entry);
     }
 
     pub fn mark_dirty(&mut self) {
@@ -558,11 +596,12 @@ impl AeternaApp {
 
                 ui.add_space(14.0);
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 26.0;
+                    ui.spacing_mut().item_spacing.x = 22.0;
                     for (view, label) in [
                         (View::Backup, t.nav_backup),
                         (View::Restore, t.nav_restore),
                         (View::Backups, t.nav_backups),
+                        (View::Jobs, t.nav_jobs),
                         (View::Apps, t.nav_apps),
                         (View::Settings, t.nav_settings),
                         (View::Activity, t.nav_activity),
@@ -588,6 +627,101 @@ impl AeternaApp {
                     ],
                     Stroke::new(1.0, p.border),
                 );
+            });
+    }
+
+    /// Notices get their own strip at the very top of the window, so they never
+    /// cover anything, and disappear after a few seconds.
+    fn notices_panel(&mut self, ui: &mut Ui) {
+        let now = Instant::now();
+        self.notices.retain(|n| n.until > now);
+        if self.notices.is_empty() {
+            return;
+        }
+        let p = *palette(ui);
+        let mut dismissed = None;
+        let mut hovered = Vec::new();
+        egui::Panel::top("notices")
+            .show_separator_line(false)
+            .frame(Frame::new().fill(p.background).inner_margin(Margin {
+                left: 32,
+                right: 28,
+                top: 10,
+                bottom: 0,
+            }))
+            .show(ui, |ui| {
+                widgets::centered_column(ui, 860.0, |ui| {
+                    for (i, n) in self.notices.iter().enumerate() {
+                        let (closed, response) = widgets::notice(ui, &n.kind, &n.text);
+                        if closed {
+                            dismissed = Some(i);
+                        }
+                        if response.contains_pointer() {
+                            hovered.push(i);
+                        }
+                        ui.add_space(4.0);
+                    }
+                });
+            });
+        for i in hovered {
+            let hold = now + std::time::Duration::from_secs(3);
+            if let Some(n) = self.notices.get_mut(i) {
+                n.until = n.until.max(hold);
+            }
+        }
+        if let Some(i) = dismissed {
+            self.notices.remove(i);
+        }
+        if let Some(next) = self.notices.iter().map(|n| n.until).min() {
+            ui.ctx()
+                .request_repaint_after(next.saturating_duration_since(now));
+        }
+    }
+
+    /// In the viewer (opened by double-click), a line that says what is shown
+    /// and how to leave.
+    fn viewer_bar(&mut self, ui: &mut Ui) {
+        let Some(folder) = self.viewer.clone() else {
+            return;
+        };
+        let p = *palette(ui);
+        let t = self.lang.t();
+        egui::Panel::top("viewer")
+            .show_separator_line(false)
+            .frame(
+                Frame::new()
+                    .fill(p.panel)
+                    .inner_margin(Margin::symmetric(32, 8)),
+            )
+            .show(ui, |ui| {
+                widgets::centered_column(ui, 860.0, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(
+                                    self.lang.viewer_banner(&folder.display().to_string()),
+                                )
+                                .size(13.0)
+                                .color(p.text_secondary),
+                            )
+                            .truncate(),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if widgets::button(ui, ButtonKind::Secondary, t.close_viewer, true)
+                                .clicked()
+                            {
+                                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                            if matches!(self.screen, Screen::Browse(_) | Screen::Done(_))
+                                && !self.is_busy()
+                                && widgets::button(ui, ButtonKind::Quiet, t.back_arrow, true)
+                                    .clicked()
+                            {
+                                self.screen = Screen::Main;
+                            }
+                        });
+                    });
+                });
             });
     }
 
@@ -682,7 +816,9 @@ impl eframe::App for AeternaApp {
             self.applied_title = Some(self.lang);
         }
 
+        self.notices_panel(ui);
         self.header(ui);
+        self.viewer_bar(ui);
         self.footer(ui);
 
         let p = *palette(ui);
@@ -710,43 +846,26 @@ impl eframe::App for AeternaApp {
                 top: 20,
                 bottom: 12,
             }))
-            .show(ui, |ui| {
-                // Notices sit above every screen.
-                let mut dismissed = None;
-                if !self.notices.is_empty() {
-                    widgets::centered_column(ui, 860.0, |ui| {
-                        for (i, n) in self.notices.iter().enumerate() {
-                            if widgets::notice(ui, &n.kind, &n.text) {
-                                dismissed = Some(i);
-                            }
-                        }
-                        ui.add_space(6.0);
-                    });
-                }
-                if let Some(i) = dismissed {
-                    self.notices.remove(i);
-                }
-
-                match &self.screen {
-                    Screen::Preview(_) => views::preview::show(self, ui),
-                    Screen::Browse(_) => views::browse::show(self, ui),
-                    Screen::Working => views::working::show_working(self, ui),
-                    Screen::Done(_) => views::working::show_done(self, ui),
-                    Screen::Main => {
-                        egui::ScrollArea::vertical()
-                            .id_salt(("main", self.view as u8))
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                widgets::centered_column(ui, 860.0, |ui| match self.view {
-                                    View::Backup => views::backup::show(self, ui),
-                                    View::Restore => views::restore::show(self, ui),
-                                    View::Backups => views::backups::show(self, ui),
-                                    View::Apps => views::apps::show(self, ui),
-                                    View::Settings => views::settings::show(self, ui),
-                                    View::Activity => views::activity::show(self, ui),
-                                });
+            .show(ui, |ui| match &self.screen {
+                Screen::Preview(_) => views::preview::show(self, ui),
+                Screen::Browse(_) => views::browse::show(self, ui),
+                Screen::Working => views::working::show_working(self, ui),
+                Screen::Done(_) => views::working::show_done(self, ui),
+                Screen::Main => {
+                    egui::ScrollArea::vertical()
+                        .id_salt(("main", self.view as u8))
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            widgets::centered_column(ui, 860.0, |ui| match self.view {
+                                View::Backup => views::backup::show(self, ui),
+                                View::Restore => views::restore::show(self, ui),
+                                View::Backups => views::backups::show(self, ui),
+                                View::Jobs => views::jobs::show(self, ui),
+                                View::Apps => views::apps::show(self, ui),
+                                View::Settings => views::settings::show(self, ui),
+                                View::Activity => views::activity::show(self, ui),
                             });
-                    }
+                        });
                 }
             });
 

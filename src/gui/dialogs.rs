@@ -6,7 +6,7 @@ use super::theme::{self, palette};
 use super::views;
 use super::widgets::{self, ButtonKind, NoticeKind};
 use super::{AeternaApp, Pending, Screen, VaultDialog};
-use crate::engine::crypto::passphrase_strength;
+use crate::engine::passphrase::{self, Rating};
 use crate::engine::plan::ItemKind;
 
 fn modal_frame(ui: &Ui) -> Frame {
@@ -388,7 +388,8 @@ pub fn schedule_dialog(app: &mut AeternaApp, ui: &mut Ui) {
             }
             ui.add_space(4.0);
             ui.checkbox(&mut schedule.catch_up, t.catch_up);
-            ui.checkbox(&mut schedule.only_on_ac_power, t.only_ac);
+            ui.checkbox(&mut schedule.verify_after, t.verify_after)
+                .on_hover_text(t.verify_after_hint);
 
             ui.add_space(12.0);
             widgets::secondary_text(ui, t.schedule_what);
@@ -496,47 +497,46 @@ fn time_picker(ui: &mut Ui, time: &mut String) {
     }
 }
 
-/// Choice of cipher and key derivation strength, folded away by default.
-fn encryption_method(
+/// Choice of cipher and key derivation strength for a vault set up later.
+pub(super) fn encryption_method(
     ui: &mut Ui,
-    options: &mut crate::engine::vault::VaultOptions,
+    encryption: &mut crate::config::Encryption,
     lang: crate::i18n::Lang,
 ) {
-    use crate::engine::crypto::{Cipher, KdfParams};
+    use crate::config::{CipherSetting, KeyStrength};
+    use crate::engine::crypto::Cipher;
     let t = lang.t();
-    let p = *palette(ui);
-    egui::CollapsingHeader::new(egui::RichText::new(t.enc_method_title).color(p.text_secondary))
-        .id_salt("encryption-method")
-        .show(ui, |ui| {
-            for cipher in Cipher::ALL {
-                ui.radio_value(
-                    &mut options.cipher,
-                    cipher,
-                    format!(
-                        "{}{}",
-                        cipher.display_name(),
-                        if cipher == Cipher::default() {
-                            t.recommended_suffix
-                        } else {
-                            ""
-                        }
-                    ),
-                );
-                ui.horizontal(|ui| {
-                    ui.add_space(26.0);
-                    widgets::secondary_text(ui, lang.cipher_hint(cipher));
-                });
-            }
-            ui.add_space(8.0);
-            widgets::secondary_text(ui, t.kdf_title);
-            for (params, label) in [
-                (KdfParams::PASSPHRASE, t.kdf_standard),
-                (KdfParams::STRONG, t.kdf_strong),
-                (KdfParams::VERY_STRONG, t.kdf_very_strong),
-            ] {
-                ui.radio_value(&mut options.kdf, params, label);
-            }
+    for (setting, cipher) in [
+        (CipherSetting::XChaCha20Poly1305, Cipher::XChaCha20Poly1305),
+        (CipherSetting::Aes256Gcm, Cipher::Aes256Gcm),
+    ] {
+        ui.radio_value(
+            &mut encryption.cipher,
+            setting,
+            format!(
+                "{}{}",
+                cipher.display_name(),
+                if cipher == Cipher::default() {
+                    t.recommended_suffix
+                } else {
+                    ""
+                }
+            ),
+        );
+        ui.horizontal(|ui| {
+            ui.add_space(26.0);
+            widgets::secondary_text(ui, lang.cipher_hint(cipher));
         });
+    }
+    ui.add_space(8.0);
+    widgets::secondary_text(ui, t.kdf_title);
+    for (strength, label) in [
+        (KeyStrength::Standard, t.kdf_standard),
+        (KeyStrength::Strong, t.kdf_strong),
+        (KeyStrength::VeryStrong, t.kdf_very_strong),
+    ] {
+        ui.radio_value(&mut encryption.key_strength, strength, label);
+    }
 }
 
 /// Dialog width that still fits into small windows.
@@ -564,34 +564,39 @@ fn save_recovery_file(
     Some(std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display())))
 }
 
-fn strength_meter(ui: &mut Ui, passphrase: &str, labels: [&str; 5]) {
+/// Weak / fair / good, with the criteria in the tooltip.
+fn strength_meter(ui: &mut Ui, passphrase: &str, lang: crate::i18n::Lang) {
     let p = *palette(ui);
-    let strength = passphrase_strength(passphrase);
-    let color = match strength {
-        0 | 1 => p.error,
-        2 => p.warning,
-        _ => p.success,
+    let t = lang.t();
+    let personal = passphrase::personal_details();
+    let personal: Vec<&str> = personal.iter().map(String::as_str).collect();
+    let assessment = passphrase::assess(passphrase, &personal);
+    let rating = assessment.rating();
+    let (label, color, filled) = match rating {
+        Rating::Weak => (t.strength[0], p.error, 1.0),
+        Rating::Fair => (t.strength[1], p.warning, 2.0),
+        Rating::Good => (t.strength[2], p.success, 3.0),
     };
-    ui.horizontal(|ui| {
-        let width = 160.0;
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 4.0), egui::Sense::hover());
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(2), p.raised);
-        if !passphrase.is_empty() {
-            let mut filled = rect;
-            filled.set_width(width * (f32::from(strength) + 1.0) / 5.0);
+    let response = ui
+        .horizontal(|ui| {
+            let width = 160.0;
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 4.0), egui::Sense::hover());
             ui.painter()
-                .rect_filled(filled, CornerRadius::same(2), color);
-        }
-        ui.add_space(6.0);
-        if !passphrase.is_empty() {
-            ui.label(
-                egui::RichText::new(labels[strength as usize])
-                    .size(12.5)
-                    .color(color),
-            );
-        }
-    });
+                .rect_filled(rect, CornerRadius::same(2), p.raised);
+            if !passphrase.is_empty() {
+                let mut part = rect;
+                part.set_width(width * filled / 3.0);
+                ui.painter().rect_filled(part, CornerRadius::same(2), color);
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new(label).size(12.5).color(color));
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("ⓘ").size(12.5).color(p.text_secondary));
+            }
+        })
+        .response;
+    if !passphrase.is_empty() {
+        response.on_hover_text(lang.passphrase_criteria(&assessment));
+    }
 }
 
 /// The encryption dialogs. Each frame draws the active one, if any.
@@ -624,7 +629,7 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
                     wrapped(ui, t.enc_create_hint, Some(p.text_secondary));
                     ui.add_space(10.0);
                     secret_field(ui, passphrase, t.passphrase, true, lang);
-                    strength_meter(ui, passphrase, t.strength);
+                    strength_meter(ui, passphrase, lang);
                     let repeat_field = secret_field(ui, repeat, t.passphrase_repeat, false, lang);
                     if repeat_field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         submit = true;
@@ -632,8 +637,11 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
                     ui.add_space(4.0);
                     ui.checkbox(remember, t.remember_on_computer);
                     ui.add_space(8.0);
-                    ui.add_space(4.0);
-                    encryption_method(ui, options, lang);
+                    wrapped(
+                        ui,
+                        &lang.method_for_new_vault(options.cipher, options.kdf),
+                        Some(p.text_secondary),
+                    );
                     ui.add_space(8.0);
                     wrapped(ui, t.enc_warning, Some(p.warning));
                     if let Some(error) = error.as_ref() {
@@ -875,7 +883,7 @@ pub fn vault_dialog(app: &mut AeternaApp, ui: &mut Ui) {
                     wrapped(ui, t.change_hint, Some(p.text_secondary));
                     ui.add_space(10.0);
                     secret_field(ui, passphrase, t.new_passphrase, true, lang);
-                    strength_meter(ui, passphrase, t.strength);
+                    strength_meter(ui, passphrase, lang);
                     secret_field(ui, repeat, t.passphrase_repeat, false, lang);
                     if let Some(error) = error.as_ref() {
                         ui.add_space(4.0);

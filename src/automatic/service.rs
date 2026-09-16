@@ -241,8 +241,8 @@ fn check_and_run(shared: &Shared) {
         return;
     };
 
-    if let Some(s) = &schedule
-        && s.only_on_ac_power
+    if schedule.is_some()
+        && config.background.only_on_ac_power
         && !requested
         && platform::on_battery()
     {
@@ -275,9 +275,10 @@ fn check_and_run(shared: &Shared) {
     (shared.notify)(Event::Started);
 
     let key = lock(&shared.key).clone();
+    let key_for_check = key.clone();
     let mut last_report = Instant::now();
     let _background = platform::BackgroundThread::enter();
-    let (run, _report) = run_unattended(
+    let (mut run, report) = run_unattended(
         &shared.paths,
         &run_config,
         key,
@@ -293,15 +294,33 @@ fn check_and_run(shared: &Shared) {
             }
         },
     );
+    if let (Some(s), Some(report)) = (&schedule, &report)
+        && s.verify_after
+        && run.outcome.is_success()
+        && !cancel.is_cancelled()
+    {
+        let key = key_for_check.or_else(|| super::unattended_key(&shared.paths, &run_config));
+        check_backup(
+            &shared.paths,
+            &run_config,
+            report,
+            key.as_ref(),
+            &cancel,
+            &mut run,
+        );
+    }
     drop(_background);
 
     let schedule_id = schedule.as_ref().map(|s| s.id.clone());
+    let mut record = run.outcome != AutomaticOutcome::AlreadyRunning;
     State::update(&shared.paths.config_file, |state| {
         let repeated_skip = run.outcome == AutomaticOutcome::DestinationUnavailable
             && state
                 .last_automatic
                 .as_ref()
                 .is_some_and(|last| last.outcome == run.outcome);
+        // An unplugged drive is retried every few minutes; note it only once.
+        record &= !repeated_skip;
         if !repeated_skip {
             state.last_automatic = Some(run.clone());
         }
@@ -309,7 +328,60 @@ fn check_and_run(shared: &Shared) {
             state.schedules.entry(id).or_default().last_run = Some(run.clone());
         }
     });
+    if record {
+        crate::automatic::record_run(&shared.paths.config_file, &run, report.as_ref(), false);
+    }
     tracing::info!(outcome = ?run.outcome, "automatic backup finished: {label}");
     *lock(&shared.running) = None;
     (shared.notify)(Event::Finished(run));
+}
+
+/// Reads the new backup again and compares every file with its checksum.
+/// Problems turn the run into "completed with notes".
+fn check_backup(
+    paths: &AppPaths,
+    config: &Config,
+    report: &crate::engine::backup::BackupReport,
+    key: Option<&VaultKey>,
+    cancel: &CancelToken,
+    run: &mut AutomaticRun,
+) {
+    let Some(id) = report
+        .snapshot_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+    else {
+        return;
+    };
+    let computer = platform::computer_name();
+    let result = crate::engine::snapshots::find(&config.destination, &id, &computer, key)
+        .and_then(|snapshot| crate::engine::verify::verify(&snapshot, key, cancel, &mut |_| {}));
+    match result {
+        Ok(check) if !check.cancelled => {
+            tracing::info!(
+                damaged = check.damaged.len(),
+                missing = check.missing.len(),
+                "automatic backup checked: {id}"
+            );
+            crate::history::record(
+                &paths.config_file,
+                crate::history::Event::Verified {
+                    snapshot: id,
+                    files: check.files,
+                    damaged: check.damaged.len() as u64,
+                    missing: check.missing.len() as u64,
+                },
+            );
+            if !check.is_ok() {
+                run.outcome = AutomaticOutcome::CompleteWithNotes;
+                run.message = format!(
+                    "check found {} damaged and {} missing files",
+                    check.damaged.len(),
+                    check.missing.len()
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(err) => tracing::warn!("automatic backup could not be checked: {err}"),
+    }
 }

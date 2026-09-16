@@ -14,6 +14,7 @@ mod config;
 mod engine;
 mod error;
 mod gui;
+mod history;
 mod i18n;
 mod logging;
 mod paths;
@@ -50,6 +51,14 @@ fn main() -> ExitCode {
     let Some(command) = args.command else {
         return run_window(paths, loaded, log, args.background);
     };
+    if let cli::Command::Add { folder } = &command {
+        // Handed to the window, which may already be running.
+        if let Err(err) = platform::context_menu::pending::push(&paths.config_file, folder) {
+            tracing::error!("folder could not be handed to the window: {err}");
+            return ExitCode::FAILURE;
+        }
+        return run_window(paths, loaded, log, false);
+    }
     if let cli::Command::Open { path } = command {
         return open_window(
             paths,
@@ -78,13 +87,6 @@ fn run_window(
         }
         return ExitCode::SUCCESS;
     };
-    // Started with Windows although no automatic backups are switched on:
-    // nothing to do in the background.
-    if background && !loaded.config.any_schedule_enabled() {
-        tracing::info!("no automatic backups are switched on; not starting in the background");
-        return ExitCode::SUCCESS;
-    }
-
     let options = gui::StartOptions {
         hidden: background,
         instance_key: key,
@@ -100,7 +102,10 @@ fn open_window(
     options: gui::StartOptions,
 ) -> ExitCode {
     match gui::run(paths, loaded, log.buffer.clone(), options) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            tracing::info!("window closed");
+            ExitCode::SUCCESS
+        }
         Err(err) => {
             tracing::error!("the window could not be opened: {err:#}");
             platform::show_fatal_error(&format!(

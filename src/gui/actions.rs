@@ -13,7 +13,6 @@ use super::{
 };
 use crate::config::Schedule;
 use crate::config::Source;
-use crate::engine::crypto::passphrase_strength;
 use crate::engine::plan::{
     self, BackupInput, BackupPlan, ItemKind, RestoreOptions, RestorePlan, RestoreTarget,
 };
@@ -27,8 +26,6 @@ use crate::i18n::Lang;
 use crate::platform::known_paths::KnownPaths;
 use crate::platform::{self, vss::LiveFiles};
 use crate::state;
-
-pub const MIN_PASSPHRASE_CHARS: usize = 10;
 
 impl AeternaApp {
     fn key_dir(&self) -> PathBuf {
@@ -265,6 +262,75 @@ impl AeternaApp {
         }
     }
 
+    /// Lets the user pick a folder; with the option on, backups go into an
+    /// `AeternaVault` folder inside it.
+    pub fn choose_destination(&mut self, ctx: &egui::Context) {
+        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        self.config.destination =
+            snapshots::chosen_destination(&folder, self.config.advanced.destination_app_folder);
+        tracing::info!("destination chosen: {}", self.config.destination.display());
+        self.record(crate::history::Event::DestinationChanged {
+            destination: self.config.destination.display().to_string(),
+        });
+        self.mark_dirty();
+        self.destination_changed(ctx);
+    }
+
+    /// Switching the option also moves the current destination in or out of
+    /// its `AeternaVault` folder, unless backups already live there.
+    pub fn set_destination_app_folder(&mut self, ctx: &egui::Context, on: bool) {
+        self.config.advanced.destination_app_folder = on;
+        self.mark_dirty();
+        let current = self.config.destination.clone();
+        if current.as_os_str().is_empty() || snapshots::contains_backups(&current) {
+            return;
+        }
+        let named = current.file_name().is_some_and(|n| {
+            n.to_string_lossy()
+                .eq_ignore_ascii_case(snapshots::APP_FOLDER)
+        });
+        let adjusted = match (on, named, current.parent()) {
+            (true, false, _) => Some(current.join(snapshots::APP_FOLDER)),
+            (false, true, Some(parent)) if !parent.as_os_str().is_empty() => {
+                Some(parent.to_path_buf())
+            }
+            _ => None,
+        };
+        if let Some(destination) = adjusted {
+            self.record(crate::history::Event::DestinationChanged {
+                destination: destination.display().to_string(),
+            });
+            self.config.destination = destination;
+            self.destination_changed(ctx);
+        }
+    }
+
+    pub fn set_explorer_menu(&mut self, on: bool) {
+        self.config.advanced.explorer_menu = on;
+        self.mark_dirty();
+        if !platform::system_changes_allowed() {
+            return;
+        }
+        if let Err(err) =
+            platform::context_menu::set_registered(on, self.lang.t().explorer_menu_label)
+        {
+            self.notify(NoticeKind::Error, err.to_string());
+        }
+    }
+
+    pub fn set_open_by_double_click(&mut self, on: bool) {
+        self.config.advanced.open_by_double_click = on;
+        self.mark_dirty();
+        if !platform::system_changes_allowed() {
+            return;
+        }
+        if let Err(err) = platform::file_association::set_registered(on) {
+            self.notify(NoticeKind::Error, err.to_string());
+        }
+    }
+
     pub fn destination_changed(&mut self, ctx: &egui::Context) {
         self.vault.key = None;
         self.refresh_vault();
@@ -347,13 +413,19 @@ impl AeternaApp {
             return;
         }
         let sources = self.collect_sources();
-        if sources.may_encrypt() && self.vault.key.is_none() {
-            self.refresh_vault();
+        // Check the destination again before every backup: the folder or the
+        // encrypted vault in it may have been deleted or moved in the meantime.
+        self.refresh_vault();
+        if sources.may_encrypt() {
             if self.vault.header.is_none() {
-                self.notify(
-                    NoticeKind::Warning,
-                    self.lang.error_message(&EngineError::EncryptionNotSetUp),
-                );
+                self.notify(NoticeKind::Warning, self.lang.t().vault_missing);
+                self.vault.dialog = Some(VaultDialog::Create {
+                    passphrase: String::new(),
+                    repeat: String::new(),
+                    remember: true,
+                    options: self.config.encryption.vault_options(),
+                    error: None,
+                });
                 return;
             }
             if self.vault.key.is_none() {
@@ -543,6 +615,7 @@ impl AeternaApp {
                 }
             }
             TaskOutput::Backup(result) => {
+                self.record(crate::history::backup_event(&result, false));
                 let result = result.map_err(|e| {
                     tracing::error!("backup failed: {e}");
                     self.lang.error_message(&e)
@@ -554,6 +627,15 @@ impl AeternaApp {
                 self.refresh_snapshots(ctx);
             }
             TaskOutput::Restore(result) => {
+                let snapshot = self
+                    .selected_snapshot()
+                    .map(|s| s.id.clone())
+                    .unwrap_or_default();
+                let target = match (self.restore.to_folder, &self.restore.folder) {
+                    (true, Some(folder)) => folder.display().to_string(),
+                    _ => String::new(),
+                };
+                self.record(crate::history::restore_event(&result, &snapshot, &target));
                 let result = result.map_err(|e| {
                     tracing::error!("restore failed: {e}");
                     self.lang.error_message(&e)
@@ -630,6 +712,7 @@ impl AeternaApp {
     pub fn set_encryption(&mut self, enabled: bool) {
         if !enabled {
             self.config.encryption.enabled = false;
+            self.record(crate::history::Event::EncryptionSwitched { on: false });
             self.mark_dirty();
             self.notify(NoticeKind::Info, self.lang.t().encryption_disabled_note);
             return;
@@ -638,6 +721,7 @@ impl AeternaApp {
         match (&self.vault.header, &self.vault.key) {
             (Some(_), Some(_)) => {
                 self.config.encryption.enabled = true;
+                self.record(crate::history::Event::EncryptionSwitched { on: true });
                 self.mark_dirty();
             }
             (Some(_), None) => self.open_unlock(AfterUnlock::EnableEncryption),
@@ -646,7 +730,7 @@ impl AeternaApp {
                     passphrase: String::new(),
                     repeat: String::new(),
                     remember: true,
-                    options: vault::VaultOptions::default(),
+                    options: self.config.encryption.vault_options(),
                     error: None,
                 });
             }
@@ -656,9 +740,9 @@ impl AeternaApp {
     /// Validates a new passphrase; returns a message for the user if unsuitable.
     pub fn passphrase_problem(&self, passphrase: &str, repeat: &str) -> Option<String> {
         let t = self.lang.t();
-        if passphrase.chars().count() < MIN_PASSPHRASE_CHARS || passphrase_strength(passphrase) == 0
-        {
-            Some(t.passphrase_too_weak.to_string())
+        // Only an empty passphrase is refused; how good it is, is the user's choice.
+        if passphrase.is_empty() {
+            Some(t.passphrase_empty.to_string())
         } else if passphrase != repeat {
             Some(t.passphrases_differ.to_string())
         } else {
@@ -685,6 +769,9 @@ impl AeternaApp {
             tracing::warn!("vault key could not be remembered: {err}");
         }
         tracing::info!("encrypted vault created at {}", destination.display());
+        self.record(crate::history::Event::EncryptionSetUp {
+            cipher: options.cipher.display_name().to_string(),
+        });
         self.vault.header = Some(created.header);
         self.vault.key = Some(created.key);
         self.refresh_vault();
@@ -719,6 +806,7 @@ impl AeternaApp {
             AfterUnlock::Backup { confirm } => self.plan_backup(ctx, confirm),
             AfterUnlock::EnableEncryption => {
                 self.config.encryption.enabled = true;
+                self.record(crate::history::Event::EncryptionSwitched { on: true });
                 self.mark_dirty();
             }
             AfterUnlock::ChangePassphrase => {
@@ -742,6 +830,7 @@ impl AeternaApp {
             .map_err(|e| self.lang.error_message(&e.into()))?;
         self.refresh_vault();
         tracing::info!("vault passphrase changed");
+        self.record(crate::history::Event::PassphraseChanged);
         Ok(())
     }
 
@@ -769,6 +858,7 @@ impl AeternaApp {
         match vault::replace_recovery_key(&self.config.destination, &key) {
             Ok(recovery) => {
                 tracing::info!("recovery key replaced");
+                self.record(crate::history::Event::RecoveryKeyReplaced);
                 self.refresh_vault();
                 self.vault.dialog = Some(VaultDialog::ShowRecovery {
                     key: recovery,
@@ -845,6 +935,11 @@ impl AeternaApp {
         if schedule.enabled && was_enabled != Some(true) {
             self.arm_schedule(&schedule.id);
         }
+        let job = crate::automatic::describe(&schedule, &self.config, self.lang);
+        self.record(match was_enabled {
+            None => crate::history::Event::JobCreated { job },
+            Some(_) => crate::history::Event::JobChanged { job },
+        });
         tracing::info!("automatic backup saved: {:?}", schedule.frequency);
         self.mark_dirty();
     }
@@ -857,13 +952,20 @@ impl AeternaApp {
             return;
         }
         schedule.enabled = enabled;
+        let schedule = schedule.clone();
+        let job = crate::automatic::describe(&schedule, &self.config, self.lang);
         if enabled {
             self.arm_schedule(id);
         }
+        self.record(crate::history::Event::JobSwitched { job, on: enabled });
         self.mark_dirty();
     }
 
     pub fn remove_schedule(&mut self, id: &str) {
+        if let Some(schedule) = self.config.schedules.iter().find(|s| s.id == id) {
+            let job = crate::automatic::describe(schedule, &self.config, self.lang);
+            self.record(crate::history::Event::JobRemoved { job });
+        }
         self.config.schedules.retain(|s| s.id != id);
         state::State::update(&self.paths.config_file, |state| {
             state.schedules.remove(id);

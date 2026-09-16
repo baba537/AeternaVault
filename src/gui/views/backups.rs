@@ -351,6 +351,11 @@ fn retention_card(app: &mut AeternaApp, ui: &mut Ui) {
             app.mark_dirty();
         }
 
+        if app.config.retention.enabled {
+            ui.add_space(8.0);
+            forecast_list(app, ui);
+        }
+
         ui.add_space(6.0);
         let candidates = app.retention_candidates();
         ui.horizontal_wrapped(|ui| {
@@ -362,4 +367,74 @@ fn retention_card(app: &mut AeternaApp, ui: &mut Ui) {
             }
         });
     });
+}
+
+/// A table of the backups with the day each one is expected to be removed.
+fn forecast_list(app: &mut AeternaApp, ui: &mut Ui) {
+    use crate::engine::retention::Removal;
+    let t = app.lang.t();
+    let lang = app.lang;
+    let p = *palette(ui);
+    let forecast = app.retention_forecast();
+    let rows: Vec<(String, String, bool)> = forecast
+        .removals
+        .iter()
+        .filter(|(_, removal)| *removal != Removal::NotAffected)
+        .filter_map(|(id, removal)| {
+            let snapshot = app
+                .all_snapshots()
+                .iter()
+                .find(|s| &s.qualified_id() == id)?;
+            let (title, _) = snapshot_details(app, snapshot);
+            let (text, soon) = match removal {
+                Removal::NextBackup => (t.removed_next_backup.to_string(), true),
+                Removal::After(at) => {
+                    (lang.removed_around(at.with_timezone(&chrono::Local)), false)
+                }
+                Removal::NotWithin => (t.kept_long.to_string(), false),
+                Removal::NotAffected => return None,
+            };
+            Some((title, text, soon))
+        })
+        .collect();
+
+    egui::CollapsingHeader::new(egui::RichText::new(t.forecast_title).color(p.text))
+        .id_salt("retention-forecast")
+        .default_open(true)
+        .show(ui, |ui| {
+            widgets::secondary_text(
+                ui,
+                if forecast.assumed_daily {
+                    t.forecast_assumes_daily
+                } else {
+                    t.forecast_assumes_jobs
+                },
+            );
+            if rows.is_empty() {
+                widgets::secondary_text(ui, t.forecast_empty);
+                return;
+            }
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical()
+                .id_salt("retention-forecast-rows")
+                .max_height(260.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    egui::Grid::new("retention-forecast-grid")
+                        .num_columns(2)
+                        .spacing([28.0, 4.0])
+                        .striped(false)
+                        .show(ui, |ui| {
+                            for (title, text, soon) in &rows {
+                                ui.label(egui::RichText::new(title).size(13.5));
+                                ui.label(egui::RichText::new(text).size(13.5).color(if *soon {
+                                    p.warning
+                                } else {
+                                    p.text_secondary
+                                }));
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
 }

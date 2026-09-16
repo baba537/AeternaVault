@@ -36,6 +36,49 @@ pub fn clean_open_folder() {
     }
 }
 
+/// How far the retention forecast looks ahead.
+const FORECAST_YEARS: i64 = 2;
+const FORECAST_MAX_BACKUPS: usize = 4000;
+
+/// The times of future backups by the switched-on jobs, oldest first. Without
+/// such jobs (or only "at start"), one backup a day is assumed.
+fn future_backups(config: &crate::config::Config) -> (Vec<chrono::DateTime<chrono::Utc>>, bool) {
+    use chrono::{Duration, Local, Utc};
+    let now = Local::now();
+    let end = now + Duration::days(365 * FORECAST_YEARS);
+    let mut times = Vec::new();
+    let mut daily = false;
+    for schedule in config.schedules.iter().filter(|s| s.enabled) {
+        if schedule.frequency == crate::config::Frequency::AtStart {
+            daily = true;
+            continue;
+        }
+        let mut cursor = now;
+        while let Some(next) = crate::automatic::timing::next_occurrence(schedule, cursor) {
+            if next > end || times.len() > FORECAST_MAX_BACKUPS {
+                break;
+            }
+            times.push(next.with_timezone(&Utc));
+            cursor = next + Duration::minutes(1);
+        }
+    }
+    let assumed = times.is_empty() && !daily;
+    if times.is_empty() {
+        daily = true;
+    }
+    if daily {
+        let mut day = now + Duration::days(1);
+        while day <= end {
+            times.push(day.with_timezone(&Utc));
+            day += Duration::days(1);
+        }
+    }
+    times.sort();
+    times.dedup();
+    times.truncate(FORECAST_MAX_BACKUPS);
+    (times, assumed)
+}
+
 impl AeternaApp {
     /// Shows only the backups at `opened` (a folder or a file inside it).
     pub fn enter_viewer(&mut self, ctx: &egui::Context, opened: &std::path::Path) {
@@ -87,6 +130,7 @@ impl AeternaApp {
             return;
         }
         let key = self.vault.key.clone();
+        self.manage.current = Some((snapshot.id.clone(), PathBuf::new()));
         self.task = Some(Task::spawn(
             ctx,
             TaskKind::Verify,
@@ -148,6 +192,7 @@ impl AeternaApp {
             return;
         }
         let key = self.vault.key.clone();
+        self.manage.current = Some((snapshot.id.clone(), target.clone()));
         self.task = Some(Task::spawn(
             ctx,
             TaskKind::Transfer,
@@ -193,6 +238,7 @@ impl AeternaApp {
         }
         let key = self.vault.key.clone();
         self.manage.extract_target = Some(target.clone());
+        self.manage.current = Some((snapshot.id.clone(), target.clone()));
         self.task = Some(Task::spawn(
             ctx,
             TaskKind::Extract { open },
@@ -252,6 +298,41 @@ impl AeternaApp {
         retention::to_remove(self.all_snapshots(), &self.config.retention, &self.computer)
     }
 
+    /// When the retention rules would remove each backup, assuming backups
+    /// continue as the switched-on jobs plan them (or once a day without jobs).
+    pub fn retention_forecast(&mut self) -> std::rc::Rc<super::RetentionForecast> {
+        use std::hash::{Hash, Hasher};
+        let today = chrono::Local::now().date_naive();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        format!("{:?}", self.config.retention).hash(&mut hasher);
+        format!("{:?}", self.config.schedules).hash(&mut hasher);
+        today.hash(&mut hasher);
+        for s in self.all_snapshots() {
+            s.qualified_id().hash(&mut hasher);
+            s.header.as_ref().map(|h| h.status as u8).hash(&mut hasher);
+        }
+        let fingerprint = hasher.finish();
+        if let Some((cached, forecast)) = &self.manage.forecast
+            && *cached == fingerprint
+        {
+            return forecast.clone();
+        }
+
+        let (future, assumed_daily) = future_backups(&self.config);
+        let removals = retention::forecast(
+            self.all_snapshots(),
+            &self.config.retention,
+            &self.computer,
+            &future,
+        );
+        let forecast = std::rc::Rc::new(super::RetentionForecast {
+            removals,
+            assumed_daily,
+        });
+        self.manage.forecast = Some((fingerprint, forecast.clone()));
+        forecast
+    }
+
     pub fn ask_clean_up(&mut self) {
         let ids = self.retention_candidates();
         let snapshots: Vec<SnapshotInfo> = self
@@ -293,6 +374,11 @@ impl AeternaApp {
         }
         match values.pop() {
             Some(Some(Ok(report))) if !report.deleted.is_empty() => {
+                self.record(crate::history::Event::BackupsDeleted {
+                    snapshots: report.deleted.clone(),
+                    by_rules: true,
+                    message: String::new(),
+                });
                 self.notify(
                     NoticeKind::Info,
                     self.lang.retention_removed(report.deleted.len()),
@@ -315,6 +401,45 @@ impl AeternaApp {
         output: TaskOutput,
     ) {
         let lang = self.lang;
+        let (snapshot, target) = self
+            .manage
+            .current
+            .take()
+            .map(|(s, t)| (s, t.display().to_string()))
+            .unwrap_or_default();
+        match &output {
+            TaskOutput::Verify(Ok(report)) if !report.cancelled => {
+                self.record(crate::history::Event::Verified {
+                    snapshot,
+                    files: report.files,
+                    damaged: report.damaged.len() as u64,
+                    missing: report.missing.len() as u64,
+                });
+            }
+            TaskOutput::Delete(Ok(report)) if !report.deleted.is_empty() => {
+                self.record(crate::history::Event::BackupsDeleted {
+                    snapshots: report.deleted.clone(),
+                    by_rules: false,
+                    message: report.warnings.first().cloned().unwrap_or_default(),
+                });
+            }
+            TaskOutput::Transfer(Ok(_)) => {
+                self.record(crate::history::Event::BackupMoved {
+                    snapshot,
+                    to: target,
+                });
+            }
+            TaskOutput::Extract(Ok(report))
+                if !matches!(kind, TaskKind::Extract { open: true }) && report.files > 0 =>
+            {
+                self.record(crate::history::Event::FilesCopied {
+                    snapshot,
+                    files: report.files,
+                    to: target,
+                });
+            }
+            _ => {}
+        }
         match output {
             TaskOutput::Verify(result) => {
                 self.screen = Screen::Done(Box::new(Done::Verify(

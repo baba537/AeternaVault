@@ -56,11 +56,16 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
 
     widgets::centered_column(ui, 900.0, |ui| {
         widgets::card(ui, |ui| {
-            ui.label(
-                egui::RichText::new(lang.contents_of(&title))
-                    .family(FontFamily::Name(SERIF.into()))
-                    .size(24.0),
-            );
+            ui.horizontal(|ui| {
+                if widgets::button(ui, ButtonKind::Quiet, t.back_arrow, true).clicked() {
+                    action = Some(Action::Back);
+                }
+                ui.label(
+                    egui::RichText::new(lang.contents_of(&title))
+                        .family(FontFamily::Name(SERIF.into()))
+                        .size(24.0),
+                );
+            });
             widgets::secondary_text(ui, detail);
             ui.add_space(10.0);
 
@@ -98,11 +103,17 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
                 .map(|(i, _)| i)
                 .collect();
 
-            let height = (ui.ctx().content_rect().height() - 330.0).max(260.0);
+            // Leave room for the buttons below the list, whatever the window size.
+            let reserve = if state.snapshot.needs_key() {
+                110.0
+            } else {
+                86.0
+            };
+            let height = (ui.available_height() - reserve).max(90.0);
             egui::ScrollArea::vertical()
                 .id_salt("browse-files")
                 .max_height(height)
-                .min_scrolled_height(height.min(420.0))
+                .min_scrolled_height(height)
                 .auto_shrink([false, true])
                 .show_rows(ui, 32.0, visible.len(), |ui, range| {
                     for &index in &visible[range] {

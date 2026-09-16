@@ -2,7 +2,7 @@
 
 use eframe::egui::{self, Align, Layout, Ui};
 
-use crate::config::{Appearance, LanguageSetting, default_excludes};
+use crate::config::{Appearance, BackupMode, EncryptionScope, LanguageSetting, default_excludes};
 use crate::engine::scan::Excludes;
 use crate::gui::widgets::{self, ButtonKind, NoticeKind};
 use crate::gui::{AeternaApp, theme};
@@ -94,10 +94,17 @@ pub fn encryption_info_card(app: &mut AeternaApp, ui: &mut Ui) {
                     egui::Label::new(egui::RichText::new(t.enc_without_app_script).size(13.5))
                         .wrap(),
                 );
-                ui.hyperlink_to(
-                    "docs/ENCRYPTION.md · tools/aeterna-decrypt.py",
-                    "https://github.com/baba537/AeternaVault/blob/main/docs/ENCRYPTION.md",
-                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.hyperlink_to(
+                        "docs/ENCRYPTION.md",
+                        "https://github.com/baba537/AeternaVault/blob/main/docs/ENCRYPTION.md",
+                    );
+                    widgets::secondary_text(ui, "·");
+                    ui.hyperlink_to(
+                        "tools/aeterna-decrypt.py",
+                        "https://github.com/baba537/AeternaVault/blob/main/tools/aeterna-decrypt.py",
+                    );
+                });
             });
     });
 }
@@ -180,84 +187,17 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
 
     ui.add_space(14.0);
 
-    widgets::card(ui, |ui| {
-        widgets::section_title(ui, t.enc_settings_title);
-        if app.config.encryption.everything() {
-            widgets::strong_text(ui, t.enc_status_on);
-        } else if app.config.encryption.selected() {
-            widgets::strong_text(ui, t.enc_status_selected);
-        } else {
-            widgets::secondary_text(ui, t.enc_status_off);
-        }
-        if app.vault.header.is_some() {
-            ui.add_space(6.0);
-            let mut remembered = app.vault.remembered;
-            if ui
-                .checkbox(&mut remembered, t.remember_on_computer)
-                .changed()
-            {
-                app.set_remembered(remembered);
-            }
-            ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                if widgets::button(
-                    ui,
-                    ButtonKind::Secondary,
-                    t.change_passphrase,
-                    !app.is_busy(),
-                )
-                .clicked()
-                {
-                    if app.vault.key.is_some() {
-                        app.vault.dialog = Some(crate::gui::VaultDialog::Change {
-                            passphrase: String::new(),
-                            repeat: String::new(),
-                            error: None,
-                        });
-                    } else {
-                        app.open_unlock(crate::gui::AfterUnlock::ChangePassphrase);
-                    }
-                }
-                if widgets::button(ui, ButtonKind::Secondary, t.test_recovery, true).clicked() {
-                    app.vault.dialog = Some(crate::gui::VaultDialog::TestRecovery {
-                        secret: String::new(),
-                        result: None,
-                    });
-                }
-                if widgets::button(ui, ButtonKind::Quiet, t.replace_recovery, !app.is_busy())
-                    .on_hover_text(t.replace_recovery_hint)
-                    .clicked()
-                {
-                    app.replace_recovery_key();
-                }
-                if app.vault.key.is_some()
-                    && !app.vault.remembered
-                    && widgets::button(ui, ButtonKind::Quiet, t.lock_now, true).clicked()
-                {
-                    app.lock_vault(&ctx);
-                }
-            });
-        }
-        if platform::file_association::supported() {
-            ui.add_space(8.0);
-            let mut on = platform::file_association::is_registered();
-            if ui.checkbox(&mut on, t.open_by_double_click).changed()
-                && let Err(err) = platform::file_association::set_registered(on)
-            {
-                app.notify(NoticeKind::Error, err.to_string());
-            }
-            ui.horizontal(|ui| {
-                ui.add_space(26.0);
-                widgets::secondary_text(ui, t.open_by_double_click_hint);
-            });
-        }
-    });
+    destination_card(app, ui);
+    ui.add_space(14.0);
+    encryption_card(app, ui);
+    ui.add_space(14.0);
 
     if app.vault.header.is_some() {
-        ui.add_space(14.0);
         encryption_info_card(app, ui);
+        ui.add_space(14.0);
     }
 
+    background_card(app, ui);
     ui.add_space(14.0);
 
     widgets::card(ui, |ui| {
@@ -359,4 +299,227 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
         });
     });
     ui.add_space(12.0);
+}
+
+fn indented_hint(ui: &mut Ui, text: &str) {
+    ui.horizontal(|ui| {
+        ui.add_space(26.0);
+        widgets::secondary_text(ui, text);
+    });
+    ui.add_space(2.0);
+}
+
+/// Where backups are kept and how.
+fn destination_card(app: &mut AeternaApp, ui: &mut Ui) {
+    let ctx = ui.ctx().clone();
+    let t = app.lang.t();
+    widgets::card(ui, |ui| {
+        widgets::section_title(ui, t.destination_title);
+        ui.horizontal(|ui| {
+            let destination = app.config.destination.display().to_string();
+            if destination.is_empty() {
+                widgets::secondary_text(ui, t.destination_not_set);
+            } else {
+                widgets::strong_text(ui, destination);
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if widgets::button(ui, ButtonKind::Secondary, t.choose, !app.is_busy()).clicked() {
+                    app.choose_destination(&ctx);
+                }
+            });
+        });
+        crate::gui::views::backup::destination_status(app, ui);
+        ui.add_space(4.0);
+        let mut app_folder = app.config.advanced.destination_app_folder;
+        if ui
+            .add_enabled(
+                !app.is_busy(),
+                egui::Checkbox::new(&mut app_folder, t.destination_app_folder),
+            )
+            .changed()
+        {
+            app.set_destination_app_folder(&ctx, app_folder);
+        }
+
+        ui.add_space(12.0);
+        widgets::secondary_text(ui, t.mode_title);
+        let before = app.config.mode;
+        ui.radio_value(
+            &mut app.config.mode,
+            BackupMode::Incremental,
+            t.mode_incremental,
+        );
+        indented_hint(ui, t.mode_incremental_hint);
+        ui.radio_value(&mut app.config.mode, BackupMode::Full, t.mode_full);
+        indented_hint(ui, t.mode_full_hint);
+        if app.config.mode != before {
+            app.mark_dirty();
+        }
+    });
+}
+
+/// What is encrypted, the method, the key and the recovery key.
+fn encryption_card(app: &mut AeternaApp, ui: &mut Ui) {
+    let ctx = ui.ctx().clone();
+    let t = app.lang.t();
+    let lang = app.lang;
+    let p = *theme::palette(ui);
+
+    widgets::card(ui, |ui| {
+        widgets::section_title(ui, t.enc_settings_title);
+        if app.config.encryption.everything() {
+            widgets::strong_text(ui, t.enc_status_on);
+        } else if app.config.encryption.selected() {
+            widgets::strong_text(ui, t.enc_status_selected);
+        } else {
+            widgets::secondary_text(ui, t.enc_status_off_settings);
+        }
+
+        ui.add_space(10.0);
+        widgets::secondary_text(ui, t.enc_scope_title);
+        let before = app.config.encryption.clone();
+        ui.radio_value(
+            &mut app.config.encryption.scope,
+            EncryptionScope::Everything,
+            t.scope_encrypt_everything,
+        );
+        ui.radio_value(
+            &mut app.config.encryption.scope,
+            EncryptionScope::Selected,
+            t.scope_encrypt_selected,
+        );
+        if app.config.encryption.scope == EncryptionScope::Selected {
+            ui.horizontal_wrapped(|ui| {
+                ui.add_space(26.0);
+                widgets::lock_icon(
+                    ui,
+                    ui.cursor().left_center() + egui::vec2(6.0, 9.0),
+                    p.accent,
+                );
+                ui.add_space(16.0);
+                widgets::secondary_text(ui, t.scope_selected_hint);
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(22.0);
+                ui.checkbox(
+                    &mut app.config.encryption.applications,
+                    t.encrypt_app_settings,
+                );
+            });
+        }
+
+        ui.add_space(10.0);
+        widgets::secondary_text(ui, t.enc_method_title);
+        match &app.vault.header {
+            Some(header) => {
+                let cipher = header
+                    .data_cipher()
+                    .map(|c| c.display_name())
+                    .unwrap_or("?");
+                ui.add(
+                    egui::Label::new(egui::RichText::new(lang.method_fixed(cipher)).size(13.5))
+                        .wrap(),
+                );
+            }
+            None => {
+                crate::gui::dialogs::encryption_method(ui, &mut app.config.encryption, lang);
+            }
+        }
+        if app.config.encryption != before {
+            app.mark_dirty();
+        }
+
+        if app.vault.header.is_some() {
+            ui.add_space(10.0);
+            let mut remembered = app.vault.remembered;
+            if ui
+                .checkbox(&mut remembered, t.remember_on_computer)
+                .changed()
+            {
+                app.set_remembered(remembered);
+            }
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                if widgets::button(
+                    ui,
+                    ButtonKind::Secondary,
+                    t.change_passphrase,
+                    !app.is_busy(),
+                )
+                .clicked()
+                {
+                    if app.vault.key.is_some() {
+                        app.vault.dialog = Some(crate::gui::VaultDialog::Change {
+                            passphrase: String::new(),
+                            repeat: String::new(),
+                            error: None,
+                        });
+                    } else {
+                        app.open_unlock(crate::gui::AfterUnlock::ChangePassphrase);
+                    }
+                }
+                if widgets::button(ui, ButtonKind::Secondary, t.test_recovery, true).clicked() {
+                    app.vault.dialog = Some(crate::gui::VaultDialog::TestRecovery {
+                        secret: String::new(),
+                        result: None,
+                    });
+                }
+                if widgets::button(ui, ButtonKind::Quiet, t.replace_recovery, !app.is_busy())
+                    .on_hover_text(t.replace_recovery_hint)
+                    .clicked()
+                {
+                    app.replace_recovery_key();
+                }
+                if app.vault.key.is_some()
+                    && !app.vault.remembered
+                    && widgets::button(ui, ButtonKind::Quiet, t.lock_now, true).clicked()
+                {
+                    app.lock_vault(&ctx);
+                }
+            });
+        }
+        if platform::file_association::supported() {
+            ui.add_space(8.0);
+            let mut on = app.config.advanced.open_by_double_click;
+            if ui.checkbox(&mut on, t.open_by_double_click).changed() {
+                app.set_open_by_double_click(on);
+            }
+            indented_hint(ui, t.open_by_double_click_hint);
+        }
+    });
+}
+
+/// Starting with Windows, the notification area and power.
+fn background_card(app: &mut AeternaApp, ui: &mut Ui) {
+    let t = app.lang.t();
+    widgets::card(ui, |ui| {
+        widgets::section_title(ui, t.background_title);
+        let autostart = app.background.as_ref().map(|b| b.autostart);
+        let mut on = autostart.unwrap_or(false);
+        if ui
+            .add_enabled(
+                autostart.is_some(),
+                egui::Checkbox::new(&mut on, t.start_with_windows),
+            )
+            .changed()
+        {
+            app.set_autostart(on);
+        }
+        indented_hint(ui, t.start_with_windows_hint);
+        let before = app.config.background.clone();
+        ui.checkbox(&mut app.config.background.keep_running, t.keep_running);
+        indented_hint(ui, t.keep_running_hint);
+        ui.checkbox(&mut app.config.background.only_on_ac_power, t.only_ac);
+        indented_hint(ui, t.only_ac_hint);
+        if app.config.background != before {
+            app.mark_dirty();
+        }
+        if platform::file_association::supported() {
+            let mut on = app.config.advanced.explorer_menu;
+            if ui.checkbox(&mut on, t.explorer_menu).changed() {
+                app.set_explorer_menu(on);
+            }
+            indented_hint(ui, t.explorer_menu_hint);
+        }
+    });
 }

@@ -100,6 +100,9 @@ pub enum Command {
     /// Open backups (a folder, or the "Open with AeternaVault.avault" file) in
     /// a window to browse them, without changing any settings.
     Open { path: PathBuf },
+    /// Add a folder to the list of folders to back up and show it in the window
+    /// (used by "Back up with AeternaVault" in the Explorer menu).
+    Add { folder: PathBuf },
 }
 
 /// The key for backups at `destination`: remembered, from the environment, or
@@ -163,7 +166,7 @@ pub fn run(command: Command, paths: &AppPaths, loaded: Loaded) -> ExitCode {
             ExitCode::SUCCESS
         }
 
-        Command::Open { .. } => {
+        Command::Open { .. } | Command::Add { .. } => {
             eprintln!("error: `open` starts a window; run it without a console redirect");
             ExitCode::FAILURE
         }
@@ -228,6 +231,7 @@ pub fn run(command: Command, paths: &AppPaths, loaded: Loaded) -> ExitCode {
                 State::update(&paths.config_file, |state| {
                     state.last_automatic = Some(run.clone());
                 });
+                automatic::record_run(&paths.config_file, &run, report.as_ref(), true);
                 if let Some(report) = &report {
                     println!("{}", report.snapshot_dir.display());
                 }
@@ -277,7 +281,12 @@ pub fn run(command: Command, paths: &AppPaths, loaded: Loaded) -> ExitCode {
                 println!("Dry run: nothing was changed.");
                 return ExitCode::SUCCESS;
             }
-            match backup::run_backup(&plan, key.as_ref(), &LiveFiles, &cancel, &mut quiet) {
+            let result = backup::run_backup(&plan, key.as_ref(), &LiveFiles, &cancel, &mut quiet);
+            crate::history::record(
+                &paths.config_file,
+                crate::history::backup_event(&result, true),
+            );
+            match result {
                 Ok(report) => {
                     let stats = &report.header.stats;
                     println!(
@@ -320,6 +329,10 @@ pub fn run(command: Command, paths: &AppPaths, loaded: Loaded) -> ExitCode {
                     Ok(info) => info,
                     Err(err) => return fail(&err),
                 };
+            let options_target = to
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
             let options = RestoreOptions {
                 target: to
                     .map(RestoreTarget::Folder)
@@ -349,7 +362,12 @@ pub fn run(command: Command, paths: &AppPaths, loaded: Loaded) -> ExitCode {
                 println!("Add --yes to restore these files.");
                 return ExitCode::from(2);
             }
-            match restore::run_restore(&plan, key.as_ref(), &cancel, &mut quiet) {
+            let result = restore::run_restore(&plan, key.as_ref(), &cancel, &mut quiet);
+            crate::history::record(
+                &paths.config_file,
+                crate::history::restore_event(&result, &info.id, &options_target),
+            );
+            match result {
                 Ok(report) => {
                     println!(
                         "{}",

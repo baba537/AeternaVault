@@ -4,6 +4,7 @@
 
 pub mod apps;
 pub mod autostart;
+pub mod context_menu;
 pub mod file_association;
 pub mod instance;
 pub mod known_paths;

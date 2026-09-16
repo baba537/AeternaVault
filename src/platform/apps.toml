@@ -116,6 +116,28 @@ path = '{APPDATA}\Microsoft\Templates'
 label = "Templates"
 
 [[app]]
+id = "outlook-data"
+name = "Outlook data files (PST)"
+name_de = "Outlook-Datendateien (PST)"
+category = "email"
+default = false
+processes = ["outlook.exe"]
+note_en = "Archives and mailboxes stored in PST files. Can be large; close Outlook first. OST files are only a cache of the mail account and are left out."
+note_de = "Archive und Postfächer in PST-Dateien. Können groß sein; Outlook vorher schließen. OST-Dateien sind nur ein Zwischenspeicher des Kontos und werden ausgelassen."
+[[app.folder]]
+path = '{DOCUMENTS}\Outlook Files'
+label = "Outlook Files"
+exclude = ["*.ost"]
+[[app.folder]]
+path = '{DOCUMENTS}\Outlook-Dateien'
+label = "Outlook-Dateien"
+exclude = ["*.ost"]
+[[app.folder]]
+path = '{LOCALAPPDATA}\Microsoft\Outlook'
+label = "Local"
+exclude = ["*.ost", "*.nst", "RoamCache", "Offline Address Books", "*.tmp"]
+
+[[app]]
 id = "emclient"
 name = "eM Client"
 category = "email"
@@ -336,6 +358,18 @@ default = false
 [[app.folder]]
 path = '{USERPROFILE}'
 only = [".npmrc", ".yarnrc", ".yarnrc.yml"]
+
+[[app]]
+id = "cloud-cli"
+name = "Cloud, container and WSL configuration"
+name_de = "Cloud-, Container- und WSL-Konfiguration"
+category = "development"
+default = false
+note_en = "Settings of the AWS, Azure and Kubernetes command-line tools, Docker and WSL. They often contain access keys: please use an encrypted backup. Images, containers and WSL distributions are not included."
+note_de = "Einstellungen der Kommandozeilen-Tools von AWS, Azure und Kubernetes, von Docker und WSL. Sie enthalten oft Zugangsschlüssel: bitte eine verschlüsselte Sicherung verwenden. Images, Container und WSL-Distributionen sind nicht enthalten."
+[[app.folder]]
+path = '{USERPROFILE}'
+only = [".aws", ".azure/config", ".azure/clouds.config", ".kube/config", ".docker/config.json", ".docker/daemon.json", ".wslconfig"]
 
 [[app]]
 id = "putty"

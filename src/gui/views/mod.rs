@@ -5,6 +5,7 @@ pub mod apps;
 pub mod backup;
 pub mod backups;
 pub mod browse;
+pub mod jobs;
 pub mod preview;
 pub mod restore;
 pub mod settings;

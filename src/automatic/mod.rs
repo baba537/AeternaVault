@@ -133,7 +133,8 @@ pub fn run_unattended(
             ) {
                 Some(Err(err)) => tracing::warn!("old backups could not be removed: {err}"),
                 Some(Ok(removed)) => {
-                    tracing::info!("{} old backups removed", removed.deleted.len())
+                    tracing::info!("{} old backups removed", removed.deleted.len());
+                    record_retention(&paths.config_file, &removed);
                 }
                 None => {}
             }
@@ -181,6 +182,48 @@ pub fn apply_retention(
         cancel,
         &mut |_| {},
     ))
+}
+
+/// Notes removed old backups in the activity history.
+pub fn record_retention(
+    config_file: &std::path::Path,
+    report: &crate::engine::manage::DeleteReport,
+) {
+    if report.deleted.is_empty() {
+        return;
+    }
+    crate::history::record(
+        config_file,
+        crate::history::Event::BackupsDeleted {
+            snapshots: report.deleted.clone(),
+            by_rules: true,
+            message: String::new(),
+        },
+    );
+}
+
+/// Notes an automatic backup in the activity history.
+pub fn record_run(
+    config_file: &std::path::Path,
+    run: &AutomaticRun,
+    report: Option<&BackupReport>,
+    command_line: bool,
+) {
+    crate::history::record(
+        config_file,
+        crate::history::Event::Backup {
+            job: run.schedule.clone(),
+            command_line,
+            outcome: crate::history::Outcome::from_automatic(run.outcome),
+            files: run.files,
+            bytes: run.bytes,
+            snapshot: report
+                .and_then(|r| r.snapshot_dir.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            message: run.message.clone(),
+        },
+    );
 }
 
 fn outcome_for(err: &EngineError) -> AutomaticOutcome {

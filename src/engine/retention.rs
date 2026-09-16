@@ -8,7 +8,7 @@
 
 use std::collections::HashSet;
 
-use chrono::{Datelike, Local};
+use chrono::{DateTime, Datelike, Local, Utc};
 
 use super::snapshots::SnapshotInfo;
 use crate::config::Retention;
@@ -32,35 +32,11 @@ pub fn to_remove(snapshots: &[SnapshotInfo], policy: &Retention, computer: &str)
     };
     let newest_start = newest.header.as_ref().map(|h| h.started_at);
 
-    let mut keep: HashSet<String> = HashSet::new();
-    keep.insert(newest.qualified_id());
-    for s in usable.iter().take(policy.keep_last as usize) {
-        keep.insert(s.qualified_id());
-    }
-    let local = |s: &SnapshotInfo| {
-        s.header
-            .as_ref()
-            .map(|h| h.started_at.with_timezone(&Local))
-    };
-    let mut keep_per = |limit: u32, bucket: &dyn Fn(chrono::DateTime<Local>) -> (i32, u32)| {
-        let mut seen = HashSet::new();
-        for s in &usable {
-            if seen.len() >= limit as usize {
-                break;
-            }
-            if let Some(time) = local(s)
-                && seen.insert(bucket(time))
-            {
-                keep.insert(s.qualified_id());
-            }
-        }
-    };
-    keep_per(policy.keep_daily, &|t| (t.year(), t.ordinal()));
-    keep_per(policy.keep_weekly, &|t| {
-        let week = t.iso_week();
-        (week.year(), week.week())
-    });
-    keep_per(policy.keep_monthly, &|t| (t.year(), t.month()));
+    let dated: Vec<(String, DateTime<Utc>)> = usable
+        .iter()
+        .filter_map(|s| Some((s.qualified_id(), s.header.as_ref()?.started_at)))
+        .collect();
+    let keep = kept(&dated, policy);
 
     own.into_iter()
         .filter(|s| !keep.contains(&s.qualified_id()))
@@ -72,6 +48,101 @@ pub fn to_remove(snapshots: &[SnapshotInfo], policy: &Retention, computer: &str)
         })
         .filter(|s| !s.needs_unlock())
         .map(SnapshotInfo::qualified_id)
+        .collect()
+}
+
+/// Which of `backups` (complete ones, newest first) the policy keeps.
+fn kept(backups: &[(String, DateTime<Utc>)], policy: &Retention) -> HashSet<String> {
+    let mut keep: HashSet<String> = HashSet::new();
+    if let Some((newest, _)) = backups.first() {
+        keep.insert(newest.clone());
+    }
+    for (id, _) in backups.iter().take(policy.keep_last as usize) {
+        keep.insert(id.clone());
+    }
+    let mut keep_per = |limit: u32, bucket: &dyn Fn(DateTime<Local>) -> (i32, u32)| {
+        let mut seen = HashSet::new();
+        for (id, time) in backups {
+            if seen.len() >= limit as usize {
+                break;
+            }
+            if seen.insert(bucket(time.with_timezone(&Local))) {
+                keep.insert(id.clone());
+            }
+        }
+    };
+    keep_per(policy.keep_daily, &|t| (t.year(), t.ordinal()));
+    keep_per(policy.keep_weekly, &|t| {
+        let week = t.iso_week();
+        (week.year(), week.week())
+    });
+    keep_per(policy.keep_monthly, &|t| (t.year(), t.month()));
+    keep
+}
+
+/// When an existing backup will be removed if backups keep being made at `future` times.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Removal {
+    /// With the next backup (the rules already do not keep it).
+    NextBackup,
+    /// After the backup made at this time.
+    After(DateTime<Utc>),
+    /// Still kept after the last of the assumed future backups.
+    NotWithin,
+    /// Not handled by the rules (other computer, unfinished or locked).
+    NotAffected,
+}
+
+/// For every backup in `snapshots` (same order): when the rules would remove it,
+/// assuming a backup is made at each of `future` (sorted, oldest first).
+pub fn forecast(
+    snapshots: &[SnapshotInfo],
+    policy: &Retention,
+    computer: &str,
+    future: &[DateTime<Utc>],
+) -> Vec<(String, Removal)> {
+    let now_removed: HashSet<String> = to_remove(snapshots, policy, computer).into_iter().collect();
+    let mut usable: Vec<(String, DateTime<Utc>)> = snapshots
+        .iter()
+        .filter(|s| s.computer.eq_ignore_ascii_case(computer))
+        .filter(|s| s.is_usable_base() && !s.needs_unlock())
+        .filter(|s| !now_removed.contains(&s.qualified_id()))
+        .filter_map(|s| Some((s.qualified_id(), s.header.as_ref()?.started_at)))
+        .collect();
+    usable.sort_by_key(|(_, t)| std::cmp::Reverse(*t));
+    let existing: HashSet<String> = usable.iter().map(|(id, _)| id.clone()).collect();
+
+    let mut removed_at: std::collections::HashMap<String, DateTime<Utc>> = Default::default();
+    for (n, at) in future.iter().enumerate() {
+        usable.insert(0, (format!(":future-{n}"), *at));
+        let keep = kept(&usable, policy);
+        usable.retain(|(id, _)| {
+            let stays = keep.contains(id);
+            if !stays && existing.contains(id) {
+                removed_at.insert(id.clone(), *at);
+            }
+            stays
+        });
+        if removed_at.len() == existing.len() {
+            break;
+        }
+    }
+
+    snapshots
+        .iter()
+        .map(|s| {
+            let id = s.qualified_id();
+            let removal = if now_removed.contains(&id) {
+                Removal::NextBackup
+            } else if let Some(at) = removed_at.get(&id) {
+                Removal::After(*at)
+            } else if existing.contains(&id) {
+                Removal::NotWithin
+            } else {
+                Removal::NotAffected
+            };
+            (id, removal)
+        })
         .collect()
 }
 
@@ -142,6 +213,45 @@ mod tests {
 
         // Other computers are left alone.
         assert!(to_remove(&all, &policy, "OTHER").is_empty());
+    }
+
+    #[test]
+    fn forecast_follows_the_rules_over_time() {
+        let all: Vec<SnapshotInfo> = (0..10)
+            .map(|d| snapshot(d, d as i64, SnapshotStatus::Complete))
+            .collect();
+        let policy = Retention {
+            enabled: true,
+            keep_last: 2,
+            keep_daily: 3,
+            keep_weekly: 0,
+            keep_monthly: 0,
+        };
+        let start = Utc.with_ymd_and_hms(2026, 9, 16, 12, 0, 0).unwrap();
+        let future: Vec<_> = (0..30).map(|d| start + Duration::days(d)).collect();
+        let plan = forecast(&all, &policy, "PC", &future);
+        let removal = |id: &str| {
+            plan.iter()
+                .find(|(i, _)| i.ends_with(id))
+                .unwrap()
+                .1
+                .clone()
+        };
+        // Three daily backups are kept; the older seven go with the next backup.
+        assert_eq!(removal("s009"), Removal::NextBackup);
+        assert_eq!(removal("s003"), Removal::NextBackup);
+        // The oldest kept one goes first, then the next, one per day.
+        assert_eq!(removal("s002"), Removal::After(future[0]));
+        assert_eq!(removal("s001"), Removal::After(future[1]));
+        assert_eq!(removal("s000"), Removal::After(future[2]));
+
+        // With generous rules, backups outlive a short look ahead.
+        let generous = Retention {
+            keep_last: 20,
+            ..policy
+        };
+        let plan = forecast(&all, &generous, "PC", &future[..3]);
+        assert!(plan.iter().any(|(_, r)| *r == Removal::NotWithin));
     }
 
     #[test]

@@ -144,6 +144,10 @@ pub struct Advanced {
     /// Draw the window with OpenGL instead of Direct3D 12 (for graphics drivers
     /// that show glitches). Takes effect on the next start.
     pub compatibility_graphics: bool,
+    /// Register `.avault` files so a double-click opens the backups in AeternaVault.
+    pub open_by_double_click: bool,
+    /// "Back up with AeternaVault" in the Explorer context menu of folders.
+    pub explorer_menu: bool,
 }
 
 impl Default for Advanced {
@@ -157,6 +161,8 @@ impl Default for Advanced {
             save_program_list: true,
             destination_app_folder: true,
             compatibility_graphics: false,
+            open_by_double_click: true,
+            explorer_menu: false,
         }
     }
 }
@@ -229,6 +235,8 @@ pub struct Schedule {
     pub every_hours: u8,
     /// Run as soon as possible if the computer was off at the planned time.
     pub catch_up: bool,
+    /// Moved to [`Background::only_on_ac_power`] in 0.4; still read from older files.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub only_on_ac_power: bool,
     /// Back up all ticked folders; otherwise only those in `folders`.
     pub all_folders: bool,
@@ -237,6 +245,9 @@ pub struct Schedule {
     pub folders: Vec<PathBuf>,
     /// Whether the chosen application settings are included.
     pub applications: bool,
+    /// Read the new backup again afterwards and compare every file with its checksum.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub verify_after: bool,
 }
 
 impl Default for Schedule {
@@ -254,6 +265,7 @@ impl Default for Schedule {
             all_folders: true,
             folders: Vec::new(),
             applications: true,
+            verify_after: false,
         }
     }
 }
@@ -317,11 +329,12 @@ impl Default for Retention {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Background {
-    /// Keep running in the notification area when the window is closed while
-    /// automatic backups are switched on.
+    /// Keep running in the notification area when the window is closed.
     pub keep_running: bool,
     /// Whether the user has already been told that closing keeps the app running.
     pub close_hint_shown: bool,
+    /// Automatic backups wait while a notebook runs on battery.
+    pub only_on_ac_power: bool,
 }
 
 impl Default for Background {
@@ -329,6 +342,7 @@ impl Default for Background {
         Self {
             keep_running: true,
             close_hint_shown: false,
+            only_on_ac_power: false,
         }
     }
 }
@@ -344,6 +358,26 @@ pub enum EncryptionScope {
     Selected,
 }
 
+/// Cipher used when an encrypted vault is set up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CipherSetting {
+    #[default]
+    #[serde(rename = "xchacha20-poly1305")]
+    XChaCha20Poly1305,
+    #[serde(rename = "aes-256-gcm")]
+    Aes256Gcm,
+}
+
+/// How expensive guessing the passphrase is made (Argon2id parameters).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KeyStrength {
+    #[default]
+    Standard,
+    Strong,
+    VeryStrong,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Encryption {
@@ -352,6 +386,9 @@ pub struct Encryption {
     pub scope: EncryptionScope,
     /// With `Selected`: whether application settings are encrypted.
     pub applications: bool,
+    /// Method for a vault that is set up from now on. An existing vault keeps its own.
+    pub cipher: CipherSetting,
+    pub key_strength: KeyStrength,
 }
 
 impl Default for Encryption {
@@ -360,11 +397,28 @@ impl Default for Encryption {
             enabled: false,
             scope: EncryptionScope::Everything,
             applications: true,
+            cipher: CipherSetting::default(),
+            key_strength: KeyStrength::default(),
         }
     }
 }
 
 impl Encryption {
+    pub fn vault_options(&self) -> crate::engine::vault::VaultOptions {
+        use crate::engine::crypto::{Cipher, KdfParams};
+        crate::engine::vault::VaultOptions {
+            cipher: match self.cipher {
+                CipherSetting::XChaCha20Poly1305 => Cipher::XChaCha20Poly1305,
+                CipherSetting::Aes256Gcm => Cipher::Aes256Gcm,
+            },
+            kdf: match self.key_strength {
+                KeyStrength::Standard => KdfParams::PASSPHRASE,
+                KeyStrength::Strong => KdfParams::STRONG,
+                KeyStrength::VeryStrong => KdfParams::VERY_STRONG,
+            },
+        }
+    }
+
     pub fn everything(&self) -> bool {
         self.enabled && self.scope == EncryptionScope::Everything
     }
@@ -500,10 +554,14 @@ impl Config {
         config
     }
 
-    /// Fills in what older or hand-edited files may lack (schedule ids).
+    /// Fills in what older or hand-edited files may lack (schedule ids), and
+    /// moves settings that used to belong to single schedules.
     pub fn normalize(&mut self) {
         let mut seen = std::collections::HashSet::new();
         for schedule in &mut self.schedules {
+            if std::mem::take(&mut schedule.only_on_ac_power) {
+                self.background.only_on_ac_power = true;
+            }
             if schedule.id.trim().is_empty() || !seen.insert(schedule.id.clone()) {
                 schedule.id = Schedule::new_id();
                 seen.insert(schedule.id.clone());

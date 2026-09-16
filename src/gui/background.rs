@@ -14,7 +14,7 @@ use super::widgets::NoticeKind;
 use crate::automatic::service::{Event, Service};
 use crate::automatic::timing;
 use crate::platform::tray::{Tray, TrayEvent, TrayLabels};
-use crate::platform::{autostart, scheduler};
+use crate::platform::{self, autostart, file_association, scheduler};
 use crate::state::{AutomaticOutcome, State};
 
 pub enum AppEvent {
@@ -60,6 +60,25 @@ impl AeternaApp {
             }),
         );
 
+        if let Err(err) = autostart::ensure_registered() {
+            tracing::warn!("startup entry could not be registered: {err}");
+        }
+        if self.config.advanced.explorer_menu
+            && platform::system_changes_allowed()
+            && !platform::context_menu::is_registered()
+            && let Err(err) =
+                platform::context_menu::set_registered(true, self.lang.t().explorer_menu_label)
+        {
+            tracing::warn!("Explorer menu entry could not be set up: {err}");
+        }
+        if self.config.advanced.open_by_double_click
+            && platform::system_changes_allowed()
+            && file_association::supported()
+            && !file_association::is_registered()
+            && let Err(err) = file_association::set_registered(true)
+        {
+            tracing::warn!("double-click on encrypted backups could not be set up: {err}");
+        }
         let legacy_job = Some(Job::spawn(ctx, |_, send| {
             send(scheduler::remove_legacy_task())
         }));
@@ -76,6 +95,7 @@ impl AeternaApp {
             legacy_job,
         });
         self.update_tray();
+        self.take_pending_folders(ctx);
     }
 
     fn tray_labels(&self) -> TrayLabels {
@@ -106,10 +126,11 @@ impl AeternaApp {
     }
 
     /// Whether closing the window should keep AeternaVault running.
+    ///
+    /// Up to 0.3 this also required a switched-on automatic backup, so the
+    /// option seemed to do nothing without one.
     pub fn keeps_running_when_closed(&self) -> bool {
-        self.background.is_some()
-            && self.config.background.keep_running
-            && self.config.any_schedule_enabled()
+        self.background.is_some() && self.config.background.keep_running
     }
 
     fn update_tray(&mut self) {
@@ -139,7 +160,29 @@ impl AeternaApp {
         ctx.send_viewport_cmd(ViewportCommand::Focus);
         self.state = State::load(&self.paths.config_file);
         self.refresh_snapshots(ctx);
+        self.take_pending_folders(ctx);
         self.update_tray();
+    }
+
+    /// Folders handed over by "Back up with AeternaVault" in Explorer.
+    pub(super) fn take_pending_folders(&mut self, ctx: &egui::Context) {
+        let folders = platform::context_menu::pending::take(&self.paths.config_file);
+        if folders.is_empty() {
+            return;
+        }
+        for folder in folders.into_iter().filter(|f| f.is_dir()) {
+            let known = self.config.has_source_path(&folder);
+            let name = folder
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| folder.display().to_string());
+            self.add_folder(ctx, folder);
+            self.notify(NoticeKind::Success, self.lang.folder_added(&name, known));
+        }
+        if !self.is_busy() && self.pending.is_none() {
+            self.view = super::View::Backup;
+            self.screen = super::Screen::Main;
+        }
     }
 
     fn hide_window(&mut self, ctx: &egui::Context) {
@@ -173,6 +216,7 @@ impl AeternaApp {
                 if let Some(background) = &mut self.background {
                     background.autostart = autostart::is_enabled();
                 }
+                self.record(crate::history::Event::StartWithWindows { on: enabled });
             }
             Err(err) => {
                 tracing::warn!("autostart could not be changed: {err}");
@@ -248,6 +292,10 @@ impl AeternaApp {
         }
 
         if close_requested && !quitting {
+            tracing::info!(
+                keep_running = self.keeps_running_when_closed(),
+                "window close requested"
+            );
             if self.keeps_running_when_closed() {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
                 self.hide_window(ctx);
@@ -262,6 +310,8 @@ impl AeternaApp {
 
     fn automatic_finished(&mut self, ctx: &egui::Context, run: &crate::state::AutomaticRun) {
         self.state = State::load(&self.paths.config_file);
+        // The service wrote to the history.
+        self.history = crate::history::load(&self.paths.config_file);
         let hidden = self.background.as_ref().is_some_and(|b| b.hidden);
         let (ok, text) = self.lang.automatic_result(run);
         if hidden {

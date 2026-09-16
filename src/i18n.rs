@@ -524,6 +524,420 @@ impl Lang {
         }
     }
 
+    // --- 0.4 ------------------------------------------------------------------
+
+    /// Tooltip of the passphrase rating: which criteria are met.
+    pub fn passphrase_criteria(self, a: &crate::engine::passphrase::Assessment) -> String {
+        use crate::engine::passphrase::{FAIR_LENGTH, GOOD_LENGTH};
+        let mark = |ok: bool| if ok { "✓" } else { "✗" };
+        let length_ok = a.length >= FAIR_LENGTH;
+        let classes = a.classes();
+        let no_pattern = !(a.keyboard_pattern || a.sequence);
+        let not_predictable = !(a.predictable || a.personal);
+        match self {
+            Lang::En => format!(
+                "{} Length: {} characters (at least {FAIR_LENGTH}, better {GOOD_LENGTH})\n\
+                 {} Kinds of characters: {classes} of 4 (upper case, lower case, digits, special characters such as ? ! # $)\n\
+                 {} No keyboard rows or sequences such as “qwertz” or “12345”\n\
+                 {} No dates, years, common words or names\n\
+                 Any passphrase is accepted; this is only a hint.",
+                mark(length_ok),
+                a.length,
+                mark(classes >= 3),
+                mark(no_pattern),
+                mark(not_predictable),
+            ),
+            Lang::De => format!(
+                "{} Länge: {} Zeichen (mindestens {FAIR_LENGTH}, besser {GOOD_LENGTH})\n\
+                 {} Zeichenarten: {classes} von 4 (Groß- und Kleinbuchstaben, Ziffern, Sonderzeichen wie ? ! # $)\n\
+                 {} Keine Tastaturreihen oder Folgen wie „qwertz“ oder „12345“\n\
+                 {} Keine Daten, Jahreszahlen, gängigen Wörter oder Namen\n\
+                 Jede Passphrase wird akzeptiert; das ist nur ein Hinweis.",
+                mark(length_ok),
+                a.length,
+                mark(classes >= 3),
+                mark(no_pattern),
+                mark(not_predictable),
+            ),
+        }
+    }
+
+    fn kdf_name(self, kdf: crate::engine::crypto::KdfParams) -> &'static str {
+        use crate::engine::crypto::KdfParams;
+        let t = self.t();
+        let full = if kdf == KdfParams::STRONG {
+            t.kdf_strong
+        } else if kdf == KdfParams::VERY_STRONG {
+            t.kdf_very_strong
+        } else {
+            t.kdf_standard
+        };
+        full.split(['—', '–']).next().unwrap_or(full).trim()
+    }
+
+    pub fn method_for_new_vault(
+        self,
+        cipher: crate::engine::crypto::Cipher,
+        kdf: crate::engine::crypto::KdfParams,
+    ) -> String {
+        let kdf = self.kdf_name(kdf);
+        match self {
+            Lang::En => format!(
+                "Method: {} with {kdf} key derivation. It can be chosen in the settings before setting up.",
+                cipher.display_name()
+            ),
+            Lang::De => format!(
+                "Verfahren: {} mit Schlüsselableitung „{kdf}“. Es lässt sich vor dem Einrichten in den Einstellungen wählen.",
+                cipher.display_name()
+            ),
+        }
+    }
+
+    pub fn method_fixed(self, cipher: &str) -> String {
+        match self {
+            Lang::En => format!(
+                "{cipher}. The method of an existing vault stays the same; a different one can be chosen for a new destination."
+            ),
+            Lang::De => format!(
+                "{cipher}. Ein bestehender Tresor behält sein Verfahren; für ein neues Ziel lässt sich ein anderes wählen."
+            ),
+        }
+    }
+
+    pub fn folder_added(self, name: &str, already_listed: bool) -> String {
+        match (self, already_listed) {
+            (Lang::En, false) => format!("“{name}” was added to the folders to back up."),
+            (Lang::En, true) => format!("“{name}” is already in the list of folders to back up."),
+            (Lang::De, false) => {
+                format!("„{name}“ wurde zu den zu sichernden Ordnern hinzugefügt.")
+            }
+            (Lang::De, true) => {
+                format!("„{name}“ ist bereits in der Liste der zu sichernden Ordner.")
+            }
+        }
+    }
+
+    pub fn viewer_banner(self, folder: &str) -> String {
+        match self {
+            Lang::En => {
+                format!("Viewing the backups in {folder}. Your own settings are not changed.")
+            }
+            Lang::De => format!(
+                "Ansicht der Sicherungen in {folder}. Deine eigenen Einstellungen bleiben unverändert."
+            ),
+        }
+    }
+
+    pub fn removed_around(self, time: DateTime<Local>) -> String {
+        match self {
+            Lang::En => format!("removed around {}", time.format("%-d %b %Y")),
+            Lang::De => format!("wird etwa am {} entfernt", time.format("%d.%m.%Y")),
+        }
+    }
+
+    /// "Wednesday, 16 September 2026"
+    pub fn weekday_date_only(self, time: DateTime<Local>) -> String {
+        let weekday = time.weekday().num_days_from_monday() as usize;
+        match self {
+            Lang::En => format!(
+                "{}, {}",
+                [
+                    "Monday",
+                    "Tuesday",
+                    "Wednesday",
+                    "Thursday",
+                    "Friday",
+                    "Saturday",
+                    "Sunday"
+                ][weekday],
+                time.format("%-d %B %Y")
+            ),
+            Lang::De => {
+                let month = [
+                    "Januar",
+                    "Februar",
+                    "März",
+                    "April",
+                    "Mai",
+                    "Juni",
+                    "Juli",
+                    "August",
+                    "September",
+                    "Oktober",
+                    "November",
+                    "Dezember",
+                ][time.month0() as usize];
+                format!(
+                    "{}, {}. {month} {}",
+                    [
+                        "Montag",
+                        "Dienstag",
+                        "Mittwoch",
+                        "Donnerstag",
+                        "Freitag",
+                        "Samstag",
+                        "Sonntag"
+                    ][weekday],
+                    time.day(),
+                    time.year()
+                )
+            }
+        }
+    }
+
+    fn history_outcome(self, outcome: crate::history::Outcome) -> &'static str {
+        use crate::history::Outcome as O;
+        match (self, outcome) {
+            (Lang::En, O::Complete) => "completed",
+            (Lang::De, O::Complete) => "abgeschlossen",
+            (Lang::En, O::Notes) => "completed with notes",
+            (Lang::De, O::Notes) => "mit Hinweisen abgeschlossen",
+            (Lang::En, O::Cancelled) => "cancelled",
+            (Lang::De, O::Cancelled) => "abgebrochen",
+            (Lang::En, O::Skipped) => "skipped, destination not connected",
+            (Lang::De, O::Skipped) => "übersprungen, Ziel nicht angeschlossen",
+            (Lang::En, O::NeedsPassphrase) => "not run, passphrase needed",
+            (Lang::De, O::NeedsPassphrase) => "nicht ausgeführt, Passphrase benötigt",
+            (Lang::En, O::Failed) => "failed",
+            (Lang::De, O::Failed) => "fehlgeschlagen",
+        }
+    }
+
+    /// Title, detail line and marking of one history entry.
+    pub fn history_entry(
+        self,
+        event: &crate::history::Event,
+    ) -> (String, String, crate::history::Severity) {
+        use crate::history::{Event as E, Severity};
+        let en = self == Lang::En;
+        let pick = |en_text: String, de_text: String| if en { en_text } else { de_text };
+        let join = |parts: Vec<String>| {
+            parts
+                .into_iter()
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ")
+        };
+        match event {
+            E::Backup {
+                job,
+                command_line,
+                outcome,
+                files,
+                bytes,
+                snapshot,
+                message,
+            } => {
+                let what = if !job.is_empty() {
+                    pick(
+                        format!("Automatic backup “{job}”"),
+                        format!("Automatische Sicherung „{job}“"),
+                    )
+                } else if *command_line {
+                    pick(
+                        "Backup from the command line".into(),
+                        "Sicherung über die Kommandozeile".into(),
+                    )
+                } else {
+                    pick("Backup".into(), "Sicherung".into())
+                };
+                let counts = if *files > 0 || *bytes > 0 {
+                    format!("{}, {}", self.files(*files), self.bytes(*bytes))
+                } else {
+                    String::new()
+                };
+                (
+                    format!("{what} {}", self.history_outcome(*outcome)),
+                    join(vec![snapshot.clone(), counts, message.clone()]),
+                    outcome.severity(),
+                )
+            }
+            E::Restore {
+                outcome,
+                snapshot,
+                target,
+                files,
+                bytes,
+                message,
+            } => {
+                let place = if target.is_empty() {
+                    pick(
+                        "to the original places".into(),
+                        "an die ursprünglichen Orte".into(),
+                    )
+                } else {
+                    pick(format!("to {target}"), format!("nach {target}"))
+                };
+                (
+                    pick(
+                        format!("Restore {}", self.history_outcome(*outcome)),
+                        format!("Wiederherstellung {}", self.history_outcome(*outcome)),
+                    ),
+                    join(vec![
+                        snapshot.clone(),
+                        place,
+                        format!("{}, {}", self.files(*files), self.bytes(*bytes)),
+                        message.clone(),
+                    ]),
+                    outcome.severity(),
+                )
+            }
+            E::BackupsDeleted {
+                snapshots,
+                by_rules,
+                message,
+            } => {
+                let n = snapshots.len();
+                let title = match (en, *by_rules, n) {
+                    (true, true, 1) => "1 old backup removed by the rules".to_string(),
+                    (true, true, n) => format!("{n} old backups removed by the rules"),
+                    (true, false, 1) => "1 backup deleted".to_string(),
+                    (true, false, n) => format!("{n} backups deleted"),
+                    (false, true, 1) => "1 alte Sicherung nach den Regeln entfernt".to_string(),
+                    (false, true, n) => format!("{n} alte Sicherungen nach den Regeln entfernt"),
+                    (false, false, 1) => "1 Sicherung gelöscht".to_string(),
+                    (false, false, n) => format!("{n} Sicherungen gelöscht"),
+                };
+                (
+                    title,
+                    join(vec![snapshots.join(", "), message.clone()]),
+                    Severity::Neutral,
+                )
+            }
+            E::BackupMoved { snapshot, to } => (
+                pick("Backup moved".into(), "Sicherung verschoben".into()),
+                pick(
+                    format!("{snapshot} to {to}"),
+                    format!("{snapshot} nach {to}"),
+                ),
+                Severity::Neutral,
+            ),
+            E::FilesCopied {
+                snapshot,
+                files,
+                to,
+            } => (
+                pick(
+                    "Files copied out of a backup".into(),
+                    "Dateien aus einer Sicherung kopiert".into(),
+                ),
+                pick(
+                    format!("{} from {snapshot} to {to}", self.files(*files)),
+                    format!("{} aus {snapshot} nach {to}", self.files(*files)),
+                ),
+                Severity::Neutral,
+            ),
+            E::Verified {
+                snapshot,
+                files,
+                damaged,
+                missing,
+            } => {
+                let ok = *damaged == 0 && *missing == 0;
+                (
+                    match (en, ok) {
+                        (true, true) => "Backup checked: everything readable".to_string(),
+                        (true, false) => "Backup checked: problems found".to_string(),
+                        (false, true) => "Sicherung geprüft: alles lesbar".to_string(),
+                        (false, false) => "Sicherung geprüft: Probleme gefunden".to_string(),
+                    },
+                    if ok {
+                        join(vec![snapshot.clone(), self.files(*files)])
+                    } else {
+                        join(vec![
+                            snapshot.clone(),
+                            pick(
+                                format!("{damaged} damaged, {missing} missing"),
+                                format!("{damaged} beschädigt, {missing} fehlen"),
+                            ),
+                        ])
+                    },
+                    if ok {
+                        Severity::Good
+                    } else {
+                        Severity::Problem
+                    },
+                )
+            }
+            E::JobCreated { job } => (
+                pick("Backup job created".into(), "Backup-Job angelegt".into()),
+                job.clone(),
+                Severity::Neutral,
+            ),
+            E::JobChanged { job } => (
+                pick("Backup job changed".into(), "Backup-Job geändert".into()),
+                job.clone(),
+                Severity::Neutral,
+            ),
+            E::JobRemoved { job } => (
+                pick("Backup job removed".into(), "Backup-Job entfernt".into()),
+                job.clone(),
+                Severity::Neutral,
+            ),
+            E::JobSwitched { job, on } => (
+                match (en, on) {
+                    (true, true) => "Backup job switched on".to_string(),
+                    (true, false) => "Backup job switched off".to_string(),
+                    (false, true) => "Backup-Job eingeschaltet".to_string(),
+                    (false, false) => "Backup-Job ausgeschaltet".to_string(),
+                },
+                job.clone(),
+                Severity::Neutral,
+            ),
+            E::EncryptionSetUp { cipher } => (
+                pick(
+                    "Encryption set up".into(),
+                    "Verschlüsselung eingerichtet".into(),
+                ),
+                cipher.clone(),
+                Severity::Neutral,
+            ),
+            E::EncryptionSwitched { on } => (
+                match (en, on) {
+                    (true, true) => "Encryption switched on".to_string(),
+                    (true, false) => "Encryption switched off".to_string(),
+                    (false, true) => "Verschlüsselung eingeschaltet".to_string(),
+                    (false, false) => "Verschlüsselung ausgeschaltet".to_string(),
+                },
+                String::new(),
+                Severity::Neutral,
+            ),
+            E::PassphraseChanged => (
+                pick("Passphrase changed".into(), "Passphrase geändert".into()),
+                String::new(),
+                Severity::Neutral,
+            ),
+            E::RecoveryKeyReplaced => (
+                pick(
+                    "New recovery key created".into(),
+                    "Neuer Wiederherstellungsschlüssel erstellt".into(),
+                ),
+                String::new(),
+                Severity::Neutral,
+            ),
+            E::DestinationChanged { destination } => (
+                pick("Destination changed".into(), "Ziel geändert".into()),
+                destination.clone(),
+                Severity::Neutral,
+            ),
+            E::StartWithWindows { on } => (
+                match (en, on) {
+                    (true, true) => "Start with Windows switched on".to_string(),
+                    (true, false) => "Start with Windows switched off".to_string(),
+                    (false, true) => "Start mit Windows eingeschaltet".to_string(),
+                    (false, false) => "Start mit Windows ausgeschaltet".to_string(),
+                },
+                String::new(),
+                Severity::Neutral,
+            ),
+            E::Other => (
+                pick("Other event".into(), "Anderes Ereignis".into()),
+                String::new(),
+                Severity::Neutral,
+            ),
+        }
+    }
+
     pub fn retention_preview(self, n: usize) -> String {
         match (self, n) {
             (Lang::En, 0) => "With these rules, no backup would be removed at the moment.".into(),
@@ -708,13 +1122,6 @@ impl Lang {
             Lang::De => format!(
                 "Argon2id mit {mib} MiB und {iterations} Durchläufen; ein Wiederherstellungsschlüssel als zweiter Zugang"
             ),
-        }
-    }
-
-    pub fn encryption_in_short(self, cipher: &str) -> String {
-        match self {
-            Lang::En => format!("{cipher} · key from your passphrase with Argon2id"),
-            Lang::De => format!("{cipher} · Schlüssel aus deiner Passphrase mit Argon2id"),
         }
     }
 
@@ -1163,9 +1570,8 @@ pub struct Tr {
     pub enc_create_hint: &'static str,
     pub passphrase: &'static str,
     pub passphrase_repeat: &'static str,
-    pub strength: [&'static str; 5],
+    pub strength: [&'static str; 3],
     pub passphrases_differ: &'static str,
-    pub passphrase_too_weak: &'static str,
     pub remember_on_computer: &'static str,
     pub enc_warning: &'static str,
     pub set_up: &'static str,
@@ -1185,14 +1591,12 @@ pub struct Tr {
     pub passphrase_changed: &'static str,
     pub enc_settings_title: &'static str,
     pub enc_status_on: &'static str,
-    pub enc_status_off: &'static str,
     pub change_passphrase: &'static str,
     pub lock_now: &'static str,
     pub encrypted_label: &'static str,
     pub locked_backup: &'static str,
 
     // --- 0.2: automatic backups ------------------------------------------------
-    pub schedule_title: &'static str,
     pub schedule_hint: &'static str,
     pub freq_daily: &'static str,
     pub freq_weekly: &'static str,
@@ -1322,7 +1726,6 @@ pub struct Tr {
     pub scope_selected_hint: &'static str,
     pub scope_nothing_marked: &'static str,
     pub encrypt_app_settings: &'static str,
-    pub how_encrypted: &'static str,
     pub enc_status_selected: &'static str,
     pub test_recovery: &'static str,
     pub replace_recovery: &'static str,
@@ -1341,6 +1744,41 @@ pub struct Tr {
     pub enc_without_app_title: &'static str,
     pub enc_without_app_text: &'static str,
     pub enc_without_app_script: &'static str,
+
+    // --- 0.4: calmer layout, backup jobs, history ----------------------------------
+    pub passphrase_empty: &'static str,
+    pub back_arrow: &'static str,
+    pub close_viewer: &'static str,
+    pub vault_missing: &'static str,
+    pub nav_jobs: &'static str,
+    pub jobs_title: &'static str,
+    pub open_settings: &'static str,
+    pub change_in_settings: &'static str,
+    pub scope_selected_short: &'static str,
+    pub make_automatic: &'static str,
+    pub make_automatic_hint: &'static str,
+    pub enc_status_off_settings: &'static str,
+    pub enc_scope_title: &'static str,
+    pub background_title: &'static str,
+    pub start_with_windows_hint: &'static str,
+    pub keep_running_hint: &'static str,
+    pub only_ac_hint: &'static str,
+    pub forecast_title: &'static str,
+    pub forecast_assumes_jobs: &'static str,
+    pub forecast_assumes_daily: &'static str,
+    pub forecast_empty: &'static str,
+    pub removed_next_backup: &'static str,
+    pub kept_long: &'static str,
+    pub show_technical_log: &'static str,
+    pub show_history: &'static str,
+    pub history_hint: &'static str,
+    pub technical_log_hint: &'static str,
+    pub history_empty: &'static str,
+    pub explorer_menu: &'static str,
+    pub explorer_menu_hint: &'static str,
+    pub explorer_menu_label: &'static str,
+    pub verify_after: &'static str,
+    pub verify_after_hint: &'static str,
 }
 
 pub static EN: Tr = Tr {
@@ -1532,9 +1970,8 @@ pub static EN: Tr = Tr {
     enc_create_hint: "Choose a passphrase. A few unrelated words are easy to remember and hard to guess.",
     passphrase: "Passphrase",
     passphrase_repeat: "Repeat passphrase",
-    strength: ["Too short", "Weak", "Fair", "Good", "Strong"],
+    strength: ["Weak", "Fair", "Good"],
     passphrases_differ: "The two passphrases are different.",
-    passphrase_too_weak: "Please use at least 10 characters.",
     remember_on_computer: "Remember on this computer (needed for automatic backups)",
     enc_warning: "Without the passphrase or the recovery key, nobody can restore these backups — not even you.",
     set_up: "Set up",
@@ -1554,13 +1991,11 @@ pub static EN: Tr = Tr {
     passphrase_changed: "The passphrase was changed.",
     enc_settings_title: "Encryption",
     enc_status_on: "Backups to this destination are encrypted.",
-    enc_status_off: "Backups are not encrypted. Encryption can be turned on in the Backup view.",
     change_passphrase: "Change passphrase…",
     lock_now: "Lock now",
     encrypted_label: "encrypted",
     locked_backup: "Encrypted — unlock to see the details",
 
-    schedule_title: "Automatic backups",
     schedule_hint: "AeternaVault runs these backups itself, quietly and with low priority, while it is open or waiting in the notification area. Missed backups are made up.",
     freq_daily: "Every day",
     freq_weekly: "Every week",
@@ -1621,7 +2056,7 @@ pub static EN: Tr = Tr {
     stop: "Stop",
     start_with_windows: "Start AeternaVault quietly when I sign in to Windows",
     keep_running: "Keep running in the notification area when the window is closed",
-    schedule_only_while_running: "Automatic backups only run while AeternaVault is running. With both options above they also continue after closing the window and after a restart.",
+    schedule_only_while_running: "Backup jobs only run while AeternaVault is running. Turn on “start with Windows” and “keep running in the notification area” in the settings so they also run after closing the window and after a restart.",
     schedule_new_title: "New automatic backup",
     schedule_edit_title: "Automatic backup",
     schedule_when: "When",
@@ -1700,7 +2135,6 @@ pub static EN: Tr = Tr {
     scope_selected_hint: "Click the lock next to a folder or file (open a folder with the arrow to see its contents). The rest stays a normal, browsable backup.",
     scope_nothing_marked: "Nothing is marked yet, so nothing is encrypted.",
     encrypt_app_settings: "Also encrypt application settings (recommended: they can contain sign-ins)",
-    how_encrypted: "How is it encrypted?",
     enc_status_selected: "Marked folders and files are encrypted; everything else is backed up normally.",
     test_recovery: "Test recovery key…",
     replace_recovery: "New recovery key…",
@@ -1719,6 +2153,39 @@ pub static EN: Tr = Tr {
     enc_without_app_title: "Getting at the files without AeternaVault",
     enc_without_app_text: "Nothing depends on this installation: copy the whole folder anywhere, and a downloaded AeternaVault.exe (no installation needed) opens it with the passphrase or the recovery key — by double-click on “Open with AeternaVault.avault”, or on the command line:",
     enc_without_app_script: "The format is openly documented, and a short independent Python script can decrypt it as well, without AeternaVault.",
+    passphrase_empty: "Please enter a passphrase.",
+    back_arrow: "← Back",
+    close_viewer: "Close",
+    vault_missing: "The encrypted vault is no longer at the destination (the folder may have been deleted or moved). Set up encryption again to continue, or turn encryption off.",
+    nav_jobs: "Backup jobs",
+    jobs_title: "Automatic backups",
+    open_settings: "Settings",
+    change_in_settings: "Change in Settings",
+    scope_selected_short: "Folders and files with a lock are encrypted.",
+    make_automatic: "Repeat automatically…",
+    make_automatic_hint: "Creates a backup job that backs up the same folders and application settings on a schedule.",
+    enc_status_off_settings: "Backups are not encrypted. The switch is in the Backup view; everything below applies once it is on.",
+    enc_scope_title: "What is encrypted",
+    background_title: "Startup and background",
+    start_with_windows_hint: "AeternaVault stays listed in Windows’ startup apps; this switch turns it on or off there.",
+    keep_running_hint: "Closing the window leaves AeternaVault in the notification area, so backup jobs keep running. Quit from the icon’s menu.",
+    only_ac_hint: "On a laptop running on battery, backup jobs wait until it is plugged in. “Run now” always runs.",
+    forecast_title: "When backups will be removed",
+    forecast_assumes_jobs: "Estimated from the switched-on backup jobs.",
+    forecast_assumes_daily: "No backup job is on, so one backup per day is assumed.",
+    forecast_empty: "There are no complete backups of this computer yet.",
+    removed_next_backup: "removed after the next backup",
+    kept_long: "kept for a long time (beyond the forecast)",
+    show_technical_log: "Technical log",
+    show_history: "History",
+    history_hint: "Everything AeternaVault did on this computer, also in earlier sessions.",
+    technical_log_hint: "Detailed messages of this session. Older ones are in the log folder.",
+    history_empty: "Nothing has happened yet.",
+    explorer_menu: "Show “Back up with AeternaVault” when right-clicking a folder in Explorer",
+    explorer_menu_hint: "The folder is added to the list of folders to back up. On Windows 11 the entry is under “Show more options”.",
+    explorer_menu_label: "Back up with AeternaVault",
+    verify_after: "Check the backup afterwards",
+    verify_after_hint: "Reads every file of the new backup again and compares it with its checksum. Takes about as long as reading the backup.",
 };
 
 pub static DE: Tr = Tr {
@@ -1910,9 +2377,8 @@ pub static DE: Tr = Tr {
     enc_create_hint: "Wähle eine Passphrase. Ein paar Wörter, die nichts miteinander zu tun haben, sind leicht zu merken und schwer zu erraten.",
     passphrase: "Passphrase",
     passphrase_repeat: "Passphrase wiederholen",
-    strength: ["Zu kurz", "Schwach", "Mittel", "Gut", "Stark"],
+    strength: ["Schwach", "Mittel", "Gut"],
     passphrases_differ: "Die beiden Passphrasen unterscheiden sich.",
-    passphrase_too_weak: "Bitte mindestens 10 Zeichen verwenden.",
     remember_on_computer: "Auf diesem Computer merken (nötig für automatische Sicherungen)",
     enc_warning: "Ohne Passphrase oder Wiederherstellungsschlüssel kann niemand diese Sicherungen wiederherstellen – auch du nicht.",
     set_up: "Einrichten",
@@ -1932,13 +2398,11 @@ pub static DE: Tr = Tr {
     passphrase_changed: "Die Passphrase wurde geändert.",
     enc_settings_title: "Verschlüsselung",
     enc_status_on: "Sicherungen an dieses Ziel werden verschlüsselt.",
-    enc_status_off: "Sicherungen werden nicht verschlüsselt. Die Verschlüsselung lässt sich in der Ansicht „Sichern“ einschalten.",
     change_passphrase: "Passphrase ändern…",
     lock_now: "Jetzt sperren",
     encrypted_label: "verschlüsselt",
     locked_backup: "Verschlüsselt – entsperren, um Details zu sehen",
 
-    schedule_title: "Automatische Sicherungen",
     schedule_hint: "AeternaVault führt diese Sicherungen selbst aus – leise und mit niedriger Priorität, solange es geöffnet ist oder im Infobereich wartet. Verpasste Sicherungen werden nachgeholt.",
     freq_daily: "Jeden Tag",
     freq_weekly: "Jede Woche",
@@ -1999,7 +2463,7 @@ pub static DE: Tr = Tr {
     stop: "Anhalten",
     start_with_windows: "AeternaVault bei der Anmeldung an Windows leise starten",
     keep_running: "Beim Schließen des Fensters im Infobereich weiterlaufen",
-    schedule_only_while_running: "Automatische Sicherungen laufen nur, solange AeternaVault läuft. Mit beiden Optionen oben laufen sie auch nach dem Schließen des Fensters und nach einem Neustart weiter.",
+    schedule_only_while_running: "Backup-Jobs laufen nur, solange AeternaVault läuft. Schalte in den Einstellungen „mit Windows starten“ und „im Infobereich weiterlaufen“ ein, damit sie auch nach dem Schließen und nach einem Neustart laufen.",
     schedule_new_title: "Neue automatische Sicherung",
     schedule_edit_title: "Automatische Sicherung",
     schedule_when: "Wann",
@@ -2078,7 +2542,6 @@ pub static DE: Tr = Tr {
     scope_selected_hint: "Klicke auf das Schloss neben einem Ordner oder einer Datei (mit dem Pfeil siehst du den Inhalt eines Ordners). Der Rest bleibt eine normale, durchsuchbare Sicherung.",
     scope_nothing_marked: "Noch nichts markiert, daher wird nichts verschlüsselt.",
     encrypt_app_settings: "Auch Anwendungseinstellungen verschlüsseln (empfohlen: sie können Anmeldungen enthalten)",
-    how_encrypted: "Wie wird verschlüsselt?",
     enc_status_selected: "Markierte Ordner und Dateien werden verschlüsselt; alles andere wird normal gesichert.",
     test_recovery: "Wiederherstellungsschlüssel testen…",
     replace_recovery: "Neuer Wiederherstellungsschlüssel…",
@@ -2097,6 +2560,39 @@ pub static DE: Tr = Tr {
     enc_without_app_title: "An die Dateien kommen ohne AeternaVault",
     enc_without_app_text: "Nichts hängt von dieser Installation ab: Kopiere den ganzen Ordner irgendwohin, und eine heruntergeladene AeternaVault.exe (ohne Installation) öffnet ihn mit der Passphrase oder dem Wiederherstellungsschlüssel – per Doppelklick auf „Open with AeternaVault.avault“ oder auf der Kommandozeile:",
     enc_without_app_script: "Das Format ist offen dokumentiert, und ein kurzes, unabhängiges Python-Skript kann es ebenfalls entschlüsseln – ganz ohne AeternaVault.",
+    passphrase_empty: "Bitte eine Passphrase eingeben.",
+    back_arrow: "← Zurück",
+    close_viewer: "Schließen",
+    vault_missing: "Der verschlüsselte Tresor ist nicht mehr am Ziel (der Ordner wurde vielleicht gelöscht oder verschoben). Richte die Verschlüsselung neu ein, um fortzufahren, oder schalte sie aus.",
+    nav_jobs: "Backup-Jobs",
+    jobs_title: "Automatische Sicherungen",
+    open_settings: "Einstellungen",
+    change_in_settings: "In den Einstellungen ändern",
+    scope_selected_short: "Ordner und Dateien mit Schloss werden verschlüsselt.",
+    make_automatic: "Automatisch wiederholen…",
+    make_automatic_hint: "Legt einen Backup-Job an, der dieselben Ordner und Anwendungseinstellungen nach Zeitplan sichert.",
+    enc_status_off_settings: "Sicherungen werden nicht verschlüsselt. Der Schalter ist in der Ansicht „Sichern“; alles hier gilt, sobald er an ist.",
+    enc_scope_title: "Was verschlüsselt wird",
+    background_title: "Start und Hintergrund",
+    start_with_windows_hint: "AeternaVault bleibt in den Windows-Autostart-Apps eingetragen; dieser Haken schaltet den Eintrag dort an oder aus.",
+    keep_running_hint: "Beim Schließen bleibt AeternaVault im Infobereich, damit Backup-Jobs weiterlaufen. Beenden über das Menü des Symbols.",
+    only_ac_hint: "Läuft ein Laptop auf Akku, warten Backup-Jobs, bis das Netzteil angeschlossen ist. „Jetzt ausführen“ läuft immer.",
+    forecast_title: "Wann Sicherungen entfernt werden",
+    forecast_assumes_jobs: "Geschätzt anhand der eingeschalteten Backup-Jobs.",
+    forecast_assumes_daily: "Kein Backup-Job ist eingeschaltet, daher wird eine Sicherung pro Tag angenommen.",
+    forecast_empty: "Es gibt noch keine vollständigen Sicherungen dieses Computers.",
+    removed_next_backup: "wird nach der nächsten Sicherung entfernt",
+    kept_long: "bleibt lange erhalten (über die Vorschau hinaus)",
+    show_technical_log: "Technisches Protokoll",
+    show_history: "Verlauf",
+    history_hint: "Alles, was AeternaVault auf diesem Computer getan hat, auch in früheren Sitzungen.",
+    technical_log_hint: "Ausführliche Meldungen dieser Sitzung. Ältere stehen im Log-Ordner.",
+    history_empty: "Noch ist nichts passiert.",
+    explorer_menu: "„Mit AeternaVault sichern“ im Explorer-Kontextmenü von Ordnern anzeigen",
+    explorer_menu_hint: "Der Ordner wird zur Liste der zu sichernden Ordner hinzugefügt. Unter Windows 11 steht der Eintrag unter „Weitere Optionen anzeigen“.",
+    explorer_menu_label: "Mit AeternaVault sichern",
+    verify_after: "Sicherung danach prüfen",
+    verify_after_hint: "Liest jede Datei der neuen Sicherung erneut und vergleicht sie mit ihrer Prüfsumme. Dauert etwa so lange wie das Lesen der Sicherung.",
 };
 
 #[cfg(test)]

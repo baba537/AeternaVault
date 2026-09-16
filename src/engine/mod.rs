@@ -21,6 +21,7 @@ pub mod export;
 mod fsops;
 pub mod manage;
 pub mod manifest;
+pub mod passphrase;
 pub mod plan;
 pub mod restore;
 pub mod retention;

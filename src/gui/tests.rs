@@ -172,13 +172,14 @@ fn set_up_encryption_and_back_up_encrypted() {
         Some(VaultDialog::Create { .. })
     ));
 
-    // Too short first: the dialog explains and stays open.
+    // Empty first: the dialog explains and stays open. (Any other passphrase
+    // is accepted; its rating is only a hint.)
     if let Some(VaultDialog::Create {
         passphrase, repeat, ..
     }) = &mut harness.state_mut().vault.dialog
     {
-        *passphrase = "short".into();
-        *repeat = "short".into();
+        passphrase.clear();
+        repeat.clear();
     }
     click(&mut harness, "Set up");
     assert!(matches!(
@@ -516,6 +517,23 @@ fn render_readme_screenshots() {
     settle(&mut h);
     save(&mut h, "check-schedule-dialog");
 
+    // 4c. Backup jobs.
+    let mut h = build(900.0, &|config| {
+        config.language = LanguageSetting::En;
+        if config.schedules.is_empty() {
+            config.schedules = demo_schedules(config);
+        }
+    });
+    h.state_mut().view = View::Jobs;
+    settle(&mut h);
+    save(&mut h, "jobs");
+
+    // 4d. Settings.
+    let mut h = build(2200.0, &|config| config.language = LanguageSetting::En);
+    h.state_mut().view = View::Settings;
+    settle(&mut h);
+    save(&mut h, "check-settings");
+
     // 5. Encryption set-up dialog.
     let mut h = build(800.0, &|config| config.language = LanguageSetting::En);
     settle(&mut h);
@@ -536,4 +554,96 @@ fn render_readme_screenshots() {
     });
     settle(&mut h);
     save(&mut h, "overview-de-light");
+}
+
+#[test]
+fn a_deleted_destination_is_created_again_and_the_history_remembers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let destination = tmp.path().join("Vault");
+    let mut harness = harness(tmp.path(), |_| {});
+
+    let back_up = |harness: &mut Harness<'static, AeternaApp>| {
+        click(harness, "Back up now");
+        wait_until(harness, "confirmation", |app| app.pending.is_some());
+        click(harness, "Start");
+        wait_until(harness, "backup result", |app| {
+            matches!(app.screen, Screen::Done(_))
+        });
+        match &harness.state().screen {
+            Screen::Done(done) => {
+                assert!(
+                    matches!(done.as_ref(), Done::Backup(Ok(_))),
+                    "backup failed"
+                )
+            }
+            _ => unreachable!(),
+        }
+    };
+
+    back_up(&mut harness);
+    click(&mut harness, "Back to overview");
+    std::fs::remove_dir_all(&destination).unwrap();
+    back_up(&mut harness);
+    assert!(
+        destination.is_dir(),
+        "the destination folder is created again"
+    );
+
+    // The done screen offers to turn this into a backup job.
+    click(&mut harness, "Repeat automatically…");
+    assert_eq!(harness.state().view, View::Jobs);
+    assert!(harness.state().schedule.editor.is_some());
+    click(&mut harness, "Save");
+    assert_eq!(harness.state().config.schedules.len(), 1);
+
+    // Everything is in the history, also for the next start.
+    let history = crate::history::load(&harness.state().paths.config_file);
+    let backups = history
+        .iter()
+        .filter(|e| matches!(e.event, crate::history::Event::Backup { .. }))
+        .count();
+    assert_eq!(backups, 2);
+    assert!(
+        history
+            .iter()
+            .any(|e| matches!(e.event, crate::history::Event::JobCreated { .. }))
+    );
+    assert_eq!(harness.state().history.len(), history.len());
+}
+
+#[test]
+fn a_missing_encrypted_vault_asks_to_set_up_encryption_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut harness = harness(tmp.path(), |_| {});
+    let options = crate::engine::vault::VaultOptions {
+        kdf: crate::engine::crypto::KdfParams::TEST,
+        ..Default::default()
+    };
+    harness
+        .state_mut()
+        .create_vault("123", false, options)
+        .expect("a short passphrase is allowed");
+    assert!(harness.state().config.encryption.enabled);
+
+    std::fs::remove_dir_all(tmp.path().join("Vault")).unwrap();
+    click(&mut harness, "Back up now");
+    assert!(matches!(
+        harness.state().vault.dialog,
+        Some(VaultDialog::Create { .. })
+    ));
+    assert!(harness.state().task.is_none());
+}
+
+#[test]
+fn notices_disappear_on_their_own() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut harness = harness(tmp.path(), |_| {});
+    harness
+        .state_mut()
+        .notify(super::widgets::NoticeKind::Info, "Short message");
+    harness.step();
+    assert_eq!(harness.state().notices.len(), 1);
+    harness.state_mut().notices[0].until = std::time::Instant::now();
+    harness.step();
+    assert!(harness.state().notices.is_empty());
 }

@@ -539,28 +539,6 @@ pub fn unhex(text: &str) -> Option<Vec<u8>> {
     crate::platform::registry::hex_decode(text)
 }
 
-/// Rough passphrase strength for the UI: 0 = too weak … 4 = strong.
-pub fn passphrase_strength(passphrase: &str) -> u8 {
-    let length = passphrase.chars().count();
-    let classes = [
-        passphrase.chars().any(|c| c.is_lowercase()),
-        passphrase.chars().any(|c| c.is_uppercase()),
-        passphrase.chars().any(|c| c.is_ascii_digit()),
-        passphrase.chars().any(|c| !c.is_alphanumeric()),
-    ]
-    .iter()
-    .filter(|&&b| b)
-    .count();
-    let words = passphrase.split_whitespace().count();
-    match length {
-        0..=7 => 0,
-        8..=11 => 1 + u8::from(classes >= 3),
-        12..=19 => 2 + u8::from(classes >= 3 || words >= 3),
-        _ => 3 + u8::from(classes >= 2 || words >= 4),
-    }
-    .min(4)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -660,11 +638,5 @@ mod tests {
         let digest = Sha256::digest(b"content");
         assert_eq!(a.blob_id(&digest), a.blob_id(&digest));
         assert_ne!(a.blob_id(&digest), b.blob_id(&digest));
-    }
-
-    #[test]
-    fn strength_scale() {
-        assert_eq!(passphrase_strength("abc"), 0);
-        assert!(passphrase_strength("correct horse battery staple") >= 3);
     }
 }

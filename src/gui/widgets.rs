@@ -424,7 +424,8 @@ pub enum NoticeKind {
 }
 
 /// A calm message strip with a colored edge. Returns `true` when dismissed.
-pub fn notice(ui: &mut Ui, kind: &NoticeKind, text: &str) -> bool {
+/// Returns whether × was clicked, and the notice's response (for hovering).
+pub fn notice(ui: &mut Ui, kind: &NoticeKind, text: &str) -> (bool, Response) {
     let p = *palette(ui);
     let edge = kind_color(&p, kind);
     let mut dismissed = false;
@@ -467,7 +468,7 @@ pub fn notice(ui: &mut Ui, kind: &NoticeKind, text: &str) -> bool {
         },
         edge,
     );
-    dismissed
+    (dismissed, response.response)
 }
 
 pub fn kind_color(p: &Palette, kind: &NoticeKind) -> Color32 {

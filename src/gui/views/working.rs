@@ -134,6 +134,18 @@ pub fn show_done(app: &mut AeternaApp, ui: &mut Ui) {
     let lang = app.lang;
     let p = *palette(ui);
     let mut back = false;
+    let mut make_job = false;
+    // After a successful backup from the window, offer to repeat it automatically
+    // (not in the viewer, and not when a job already covers everything).
+    let offer_job = matches!(done.as_ref(), Done::Backup(Ok(report))
+            if report.header.status != SnapshotStatus::Failed
+                && report.header.status != SnapshotStatus::Cancelled)
+        && app.viewer.is_none()
+        && !app
+            .config
+            .schedules
+            .iter()
+            .any(|s| s.enabled && s.is_everything());
 
     widgets::centered_column(ui, 760.0, |ui| {
         ui.add_space(24.0);
@@ -309,6 +321,13 @@ pub fn show_done(app: &mut AeternaApp, ui: &mut Ui) {
                     if widgets::button(ui, ButtonKind::Primary, t.to_overview, true).clicked() {
                         back = true;
                     }
+                    if offer_job
+                        && widgets::button(ui, ButtonKind::Secondary, t.make_automatic, true)
+                            .on_hover_text(t.make_automatic_hint)
+                            .clicked()
+                    {
+                        make_job = true;
+                    }
                     if let Some(folder) = &open_folder
                         && widgets::button(ui, ButtonKind::Secondary, t.open_backup_folder, true)
                             .clicked()
@@ -320,7 +339,11 @@ pub fn show_done(app: &mut AeternaApp, ui: &mut Ui) {
         });
     });
 
-    if back {
+    if back || make_job {
         app.screen = Screen::Main;
+    }
+    if make_job {
+        app.view = crate::gui::View::Jobs;
+        app.new_schedule();
     }
 }

@@ -8,7 +8,6 @@ use eframe::egui::{
 };
 
 use super::status_color;
-use crate::config::BackupMode;
 use crate::engine::selection::{self, CheckState};
 use crate::gui::theme::{SANS_STRONG, palette};
 use crate::gui::widgets::{self, ButtonKind};
@@ -23,8 +22,6 @@ pub fn show(app: &mut AeternaApp, ui: &mut Ui) {
     apps_card(app, ui);
     ui.add_space(14.0);
     destination_card(app, ui);
-    ui.add_space(14.0);
-    schedule_card(app, ui);
     ui.add_space(12.0);
 }
 
@@ -544,63 +541,46 @@ fn pill(ui: &mut Ui, text: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// Destination, encryption and kind of backup
+// Destination and encryption (the details live in Settings)
 // ---------------------------------------------------------------------------
 
 fn destination_card(app: &mut AeternaApp, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     let t = app.lang.t();
-    let lang = app.lang;
     let p = *palette(ui);
 
     widgets::card(ui, |ui| {
         widgets::section_title(ui, t.destination_title);
         ui.horizontal(|ui| {
             let destination = app.config.destination.display().to_string();
-            if destination.is_empty() {
+            let not_set = destination.is_empty();
+            if not_set {
                 widgets::secondary_text(ui, t.destination_not_set);
             } else {
-                widgets::strong_text(ui, destination);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(destination)
+                            .family(FontFamily::Name(SANS_STRONG.into()))
+                            .color(p.text),
+                    )
+                    .truncate(),
+                );
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if widgets::button(ui, ButtonKind::Secondary, t.choose, !app.is_busy()).clicked()
-                    && let Some(folder) = rfd::FileDialog::new().pick_folder()
+                if not_set {
+                    if widgets::button(ui, ButtonKind::Secondary, t.choose, !app.is_busy())
+                        .clicked()
+                    {
+                        app.choose_destination(&ctx);
+                    }
+                } else if widgets::button(ui, ButtonKind::Quiet, t.change_in_settings, true)
+                    .clicked()
                 {
-                    app.config.destination = crate::engine::snapshots::chosen_destination(
-                        &folder,
-                        app.config.advanced.destination_app_folder,
-                    );
-                    app.mark_dirty();
-                    app.destination_changed(&ctx);
+                    app.view = View::Settings;
                 }
             });
         });
-        if ui
-            .checkbox(
-                &mut app.config.advanced.destination_app_folder,
-                egui::RichText::new(t.destination_app_folder)
-                    .size(13.0)
-                    .color(p.text_secondary),
-            )
-            .changed()
-        {
-            app.mark_dirty();
-        }
-        match app.destination_reachable() {
-            Some(false) => {
-                ui.label(
-                    egui::RichText::new(t.destination_unreachable)
-                        .color(p.warning)
-                        .size(13.0),
-                );
-            }
-            Some(true) => {
-                if let Some(free) = app.destination_free {
-                    widgets::secondary_text(ui, lang.free_space(free));
-                }
-            }
-            None => {}
-        }
+        destination_status(app, ui);
 
         ui.add_space(12.0);
         ui.horizontal(|ui| {
@@ -611,7 +591,9 @@ fn destination_card(app: &mut AeternaApp, ui: &mut Ui) {
             ui.add_space(4.0);
             ui.vertical(|ui| {
                 widgets::strong_text(ui, t.encrypt_backups);
-                let hint = if app.config.encryption.enabled {
+                let hint = if app.config.encryption.selected() {
+                    t.enc_status_selected
+                } else if app.config.encryption.enabled {
                     t.encrypt_hint_on
                 } else {
                     t.encrypt_hint_off
@@ -619,279 +601,54 @@ fn destination_card(app: &mut AeternaApp, ui: &mut Ui) {
                 widgets::secondary_text(ui, hint);
             });
         });
-        if app.config.encryption.enabled {
-            use crate::config::EncryptionScope;
-            ui.indent("encryption-scope", |ui| {
-                let before = app.config.encryption.clone();
-                ui.add_space(4.0);
-                ui.radio_value(
-                    &mut app.config.encryption.scope,
-                    EncryptionScope::Everything,
-                    t.scope_encrypt_everything,
+        if app.config.encryption.selected() {
+            let marked = app
+                .config
+                .sources
+                .iter()
+                .filter(|s| s.enabled && !s.encrypt_paths.is_empty())
+                .count();
+            ui.horizontal_wrapped(|ui| {
+                ui.add_space(52.0);
+                widgets::lock_icon(
+                    ui,
+                    ui.cursor().left_center() + egui::vec2(6.0, 9.0),
+                    p.accent,
                 );
-                ui.radio_value(
-                    &mut app.config.encryption.scope,
-                    EncryptionScope::Selected,
-                    t.scope_encrypt_selected,
-                );
-                if app.config.encryption.scope == EncryptionScope::Selected {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.add_space(26.0);
-                        widgets::lock_icon(
-                            ui,
-                            ui.cursor().left_center() + egui::vec2(6.0, 9.0),
-                            p.accent,
-                        );
-                        ui.add_space(16.0);
-                        widgets::secondary_text(ui, t.scope_selected_hint);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.add_space(22.0);
-                        ui.checkbox(
-                            &mut app.config.encryption.applications,
-                            t.encrypt_app_settings,
-                        );
-                    });
-                    let marked = app
-                        .config
-                        .sources
-                        .iter()
-                        .filter(|s| s.enabled && !s.encrypt_paths.is_empty())
-                        .count();
-                    if marked == 0 && !app.config.encryption.applications {
-                        ui.horizontal(|ui| {
-                            ui.add_space(26.0);
-                            ui.label(
-                                egui::RichText::new(t.scope_nothing_marked)
-                                    .size(13.0)
-                                    .color(p.warning),
-                            );
-                        });
-                    }
-                }
-                if let Some(header) = &app.vault.header {
-                    let cipher = header
-                        .data_cipher()
-                        .map(|c| c.display_name())
-                        .unwrap_or("?");
-                    ui.add_space(4.0);
-                    ui.horizontal_wrapped(|ui| {
-                        widgets::secondary_text(ui, lang.encryption_in_short(cipher));
-                        if widgets::button(ui, ButtonKind::Quiet, t.how_encrypted, true).clicked() {
-                            app.view = View::Settings;
-                        }
-                    });
-                }
-                if app.config.encryption != before {
-                    app.mark_dirty();
+                ui.add_space(16.0);
+                if marked == 0 && !app.config.encryption.applications {
+                    ui.label(
+                        egui::RichText::new(t.scope_nothing_marked)
+                            .size(13.0)
+                            .color(p.warning),
+                    );
+                } else {
+                    widgets::secondary_text(ui, t.scope_selected_short);
                 }
             });
-        }
-
-        ui.add_space(14.0);
-        widgets::section_title(ui, t.mode_title);
-        let before = app.config.mode;
-        ui.radio_value(
-            &mut app.config.mode,
-            BackupMode::Incremental,
-            t.mode_incremental,
-        );
-        indented_hint(ui, t.mode_incremental_hint);
-        ui.radio_value(&mut app.config.mode, BackupMode::Full, t.mode_full);
-        indented_hint(ui, t.mode_full_hint);
-        if app.config.mode != before {
-            app.mark_dirty();
         }
     });
 }
 
-// ---------------------------------------------------------------------------
-// Automatic backups
-// ---------------------------------------------------------------------------
-
-fn schedule_card(app: &mut AeternaApp, ui: &mut Ui) {
+/// "Not reachable" or the free space at the destination.
+pub fn destination_status(app: &AeternaApp, ui: &mut Ui) {
     let t = app.lang.t();
-    let lang = app.lang;
     let p = *palette(ui);
-
-    widgets::card(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| widgets::section_title(ui, t.schedule_title));
-            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                if widgets::button(ui, ButtonKind::Secondary, t.add_schedule, true).clicked() {
-                    app.new_schedule();
-                }
-            });
-        });
-        widgets::secondary_text(ui, t.schedule_hint);
-        ui.add_space(8.0);
-
-        // A backup that runs right now in the background.
-        let running = app.background.as_ref().and_then(|b| b.service.running());
-        if let Some(running) = &running {
-            ui.horizontal(|ui| {
-                ui.add(egui::Spinner::new().size(14.0));
-                widgets::strong_text(ui, lang.running_automatic(&running.label));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::button(ui, ButtonKind::Quiet, t.stop, true).clicked()
-                        && let Some(background) = &app.background
-                    {
-                        background.service.cancel_running();
-                    }
-                });
-            });
-            widgets::progress_line(ui, running.progress.fraction());
-            ui.add_space(8.0);
+    match app.destination_reachable() {
+        Some(false) => {
+            ui.label(
+                egui::RichText::new(t.destination_unreachable)
+                    .color(p.warning)
+                    .size(13.0),
+            );
         }
-
-        if app.config.schedules.is_empty() {
-            widgets::secondary_text(ui, t.schedules_empty);
-        }
-
-        let now = chrono::Local::now();
-        let mut toggled: Option<(String, bool)> = None;
-        let mut edit = None;
-        let mut remove = None;
-        let mut run_now = None;
-        let count = app.config.schedules.len();
-        for (index, schedule) in app.config.schedules.iter().enumerate() {
-            let label = crate::automatic::describe(schedule, &app.config, lang);
-            ui.horizontal(|ui| {
-                let mut on = schedule.enabled;
-                if widgets::toggle(ui, &mut on, true, &label) {
-                    toggled = Some((schedule.id.clone(), on));
-                }
-                ui.add_space(4.0);
-                let right_width = 250.0;
-                ui.allocate_ui_with_layout(
-                    egui::vec2((ui.available_width() - right_width).max(160.0), 40.0),
-                    Layout::top_down(Align::Min),
-                    |ui| {
-                        let color = if schedule.enabled {
-                            p.text
-                        } else {
-                            p.text_secondary
-                        };
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(&label)
-                                    .family(FontFamily::Name(SANS_STRONG.into()))
-                                    .color(color),
-                            )
-                            .truncate(),
-                        );
-                        let state = app.state.schedules.get(&schedule.id);
-                        let mut details = Vec::new();
-                        if schedule.enabled
-                            && let Some(next) =
-                                crate::automatic::timing::next_occurrence(schedule, now)
-                        {
-                            details.push(lang.next_backup(next));
-                        }
-                        if let Some(run) = state.and_then(|s| s.last_run.as_ref()) {
-                            details.push(lang.schedule_last_run(run));
-                        }
-                        if !schedule.name.trim().is_empty() {
-                            details.insert(0, crate::automatic::when_text(schedule, lang));
-                        }
-                        let failed = state
-                            .and_then(|s| s.last_run.as_ref())
-                            .is_some_and(|r| !r.outcome.is_success());
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(details.join(" · "))
-                                    .size(12.5)
-                                    .color(if failed { p.warning } else { p.text_secondary }),
-                            )
-                            .truncate(),
-                        );
-                    },
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::button(ui, ButtonKind::Quiet, "×", true)
-                        .on_hover_text(t.remove_schedule)
-                        .clicked()
-                    {
-                        remove = Some(schedule.id.clone());
-                    }
-                    if widgets::button(ui, ButtonKind::Quiet, t.edit, true).clicked() {
-                        edit = Some(schedule.id.clone());
-                    }
-                    let can_run = app.background.is_some() && running.is_none() && !app.is_busy();
-                    if widgets::button(ui, ButtonKind::Quiet, t.run_now, can_run).clicked() {
-                        run_now = Some(schedule.id.clone());
-                    }
-                });
-            });
-            if index + 1 < count {
-                let y = ui.cursor().top() + 2.0;
-                let rect = ui.max_rect();
-                ui.painter().line_segment(
-                    [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                    Stroke::new(1.0, p.border),
-                );
-                ui.add_space(5.0);
+        Some(true) => {
+            if let Some(free) = app.destination_free {
+                widgets::secondary_text(ui, app.lang.free_space(free));
             }
         }
-        if let Some((id, on)) = toggled {
-            app.set_schedule_enabled(&id, on);
-        }
-        if let Some(id) = edit {
-            app.edit_schedule(&id);
-        }
-        if let Some(id) = remove {
-            app.remove_schedule(&id);
-        }
-        if let Some(id) = run_now {
-            app.run_schedule_now(&id);
-        }
-
-        if !app.config.schedules.is_empty() {
-            ui.add_space(10.0);
-            if let Some(autostart) = app.background.as_ref().map(|b| b.autostart) {
-                let mut on = autostart;
-                if ui.checkbox(&mut on, t.start_with_windows).changed() {
-                    app.set_autostart(on);
-                }
-            }
-            if ui
-                .checkbox(&mut app.config.background.keep_running, t.keep_running)
-                .changed()
-            {
-                app.mark_dirty();
-            }
-            let autostart = app.background.as_ref().is_some_and(|b| b.autostart);
-            if app.config.any_schedule_enabled()
-                && (!autostart || !app.config.background.keep_running)
-            {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(t.schedule_only_while_running)
-                            .size(12.5)
-                            .color(p.text_secondary),
-                    )
-                    .wrap(),
-                );
-            }
-
-            if app.config.encryption.enabled && !app.vault.remembered && app.vault.key.is_none() {
-                ui.add_space(6.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(egui::RichText::new(t.schedule_needs_key).color(p.warning));
-                    if widgets::button(ui, ButtonKind::Quiet, t.remember_now, true).clicked() {
-                        app.set_remembered(true);
-                    }
-                });
-            }
-        }
-    });
-}
-fn indented_hint(ui: &mut Ui, text: &str) {
-    ui.horizontal(|ui| {
-        ui.add_space(26.0);
-        widgets::secondary_text(ui, text);
-    });
-    ui.add_space(2.0);
+        None => {}
+    }
 }
 
 /// Always-visible bar at the bottom: last backup on the left, actions on the right.
