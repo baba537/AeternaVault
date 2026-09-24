@@ -1,0 +1,228 @@
+# AeternaVault application catalog
+#
+# Applications whose data is worth keeping, and the folders it lives in. An
+# application is offered only if one of its folders exists on the computer.
+# Choosing it adds the folder to the folders to back up.
+#
+# To add or override entries without rebuilding, create `apps.toml` next to
+# `config.toml` with the same format. Entries with the same `id` replace the
+# built-in ones.
+#
+# Path tokens
+#   Windows: {USERPROFILE} {APPDATA} {LOCALAPPDATA} {DOCUMENTS} {SAVEDGAMES}
+#            {PROGRAMFILES} {PROGRAMFILESX86}
+#   Linux:   {HOME} {CONFIG} (~/.config) {DATA} (~/.local/share) {DOCUMENTS}
+#
+# Sign-ins (cookies, tokens) and saved passwords are always excluded.
+#
+# Fields: id, name, name_de, category, note_en, note_de, windows, linux,
+#         exclude (patterns), sensitive (suggest encryption)
+# Categories: browsers, email, documents, development, gaming, media
+
+# ---------------------------------------------------------------- browsers
+
+[[app]]
+id = "firefox"
+name = "Firefox"
+category = "browsers"
+note_en = "Bookmarks, history, extensions and settings of all profiles. Sign-ins and saved passwords are left out. Close Firefox before backing up."
+note_de = "Lesezeichen, Verlauf, Erweiterungen und Einstellungen aller Profile. Anmeldungen und gespeicherte Passwörter werden nicht gesichert. Firefox vor dem Sichern schließen."
+windows = ['{APPDATA}\Mozilla\Firefox']
+linux = ['{HOME}/.mozilla/firefox', '{HOME}/snap/firefox/common/.mozilla/firefox', '{HOME}/.var/app/org.mozilla.firefox/.mozilla/firefox']
+exclude = ["cookies.sqlite*", "logins.json", "logins-backup.json", "key4.db", "signedInUser.json", "cache2", "startupCache", "shader-cache", "Crash Reports", "Pending Pings", "crashes", "minidumps", "datareporting", "saved-telemetry-pings", "parent.lock", "lock", ".parentlock"]
+sensitive = true
+
+[[app]]
+id = "chrome"
+name = "Google Chrome"
+category = "browsers"
+note_en = "Bookmarks, history, extensions and settings. Sign-ins and saved passwords are left out. Close Chrome before backing up."
+note_de = "Lesezeichen, Verlauf, Erweiterungen und Einstellungen. Anmeldungen und gespeicherte Passwörter werden nicht gesichert. Chrome vor dem Sichern schließen."
+windows = ['{LOCALAPPDATA}\Google\Chrome\User Data']
+linux = ['{CONFIG}/google-chrome']
+exclude = ["Cookies", "Cookies-journal", "Login Data", "Login Data-journal", "Login Data For Account", "Login Data For Account-journal", "Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache", "GrShaderCache", "GraphiteDawnCache", "ShaderCache", "Service Worker", "Crashpad", "component_crx_cache", "optimization_guide_model_store", "Safe Browsing", "*.log", "LOCK", "Singleton*"]
+
+[[app]]
+id = "edge"
+name = "Microsoft Edge"
+category = "browsers"
+note_en = "Bookmarks, history, extensions and settings. Sign-ins and saved passwords are left out. Close Edge before backing up."
+note_de = "Lesezeichen, Verlauf, Erweiterungen und Einstellungen. Anmeldungen und gespeicherte Passwörter werden nicht gesichert. Edge vor dem Sichern schließen."
+windows = ['{LOCALAPPDATA}\Microsoft\Edge\User Data']
+linux = ['{CONFIG}/microsoft-edge']
+exclude = ["Cookies", "Cookies-journal", "Login Data", "Login Data-journal", "Login Data For Account", "Login Data For Account-journal", "Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache", "GrShaderCache", "GraphiteDawnCache", "ShaderCache", "Service Worker", "Crashpad", "component_crx_cache", "optimization_guide_model_store", "Safe Browsing", "*.log", "LOCK", "Singleton*"]
+
+[[app]]
+id = "brave"
+name = "Brave"
+category = "browsers"
+note_en = "Bookmarks, history, extensions and settings. Sign-ins and saved passwords are left out. Close Brave before backing up."
+note_de = "Lesezeichen, Verlauf, Erweiterungen und Einstellungen. Anmeldungen und gespeicherte Passwörter werden nicht gesichert. Brave vor dem Sichern schließen."
+windows = ['{LOCALAPPDATA}\BraveSoftware\Brave-Browser\User Data']
+linux = ['{CONFIG}/BraveSoftware/Brave-Browser']
+exclude = ["Cookies", "Cookies-journal", "Login Data", "Login Data-journal", "Login Data For Account", "Login Data For Account-journal", "Cache", "Code Cache", "GPUCache", "DawnCache", "GrShaderCache", "ShaderCache", "Service Worker", "Crashpad", "component_crx_cache", "Safe Browsing", "*.log", "LOCK", "Singleton*"]
+
+[[app]]
+id = "chromium"
+name = "Chromium"
+category = "browsers"
+note_en = "Bookmarks, history, extensions and settings. Sign-ins and saved passwords are left out."
+note_de = "Lesezeichen, Verlauf, Erweiterungen und Einstellungen. Anmeldungen und gespeicherte Passwörter werden nicht gesichert."
+linux = ['{CONFIG}/chromium']
+exclude = ["Cookies", "Cookies-journal", "Login Data", "Login Data-journal", "Login Data For Account", "Login Data For Account-journal", "Cache", "Code Cache", "GPUCache", "GrShaderCache", "ShaderCache", "Service Worker", "Crashpad", "*.log", "LOCK", "Singleton*"]
+
+# ---------------------------------------------------------------- email
+
+[[app]]
+id = "thunderbird"
+name = "Thunderbird"
+category = "email"
+note_en = "All mail, accounts, address books and settings. Saved passwords and sign-ins are left out; enter them again after restoring. Close Thunderbird before backing up."
+note_de = "Alle E-Mails, Konten, Adressbücher und Einstellungen. Gespeicherte Passwörter und Anmeldungen werden nicht gesichert; nach dem Wiederherstellen neu eingeben. Thunderbird vor dem Sichern schließen."
+windows = ['{APPDATA}\Thunderbird']
+linux = ['{HOME}/.thunderbird', '{HOME}/snap/thunderbird/common/.thunderbird']
+exclude = ["cookies.sqlite*", "logins.json", "logins-backup.json", "key4.db", "signedInUser.json", "cache2", "startupCache", "Crash Reports", "Pending Pings", "crashes", "minidumps", "datareporting", "saved-telemetry-pings", "parent.lock", "lock", ".parentlock"]
+sensitive = true
+
+[[app]]
+id = "outlook-data"
+name = "Outlook data files (PST)"
+name_de = "Outlook-Datendateien (PST)"
+category = "email"
+note_en = "Archives and mailboxes stored in PST files. OST files are only a copy of the mail account and are left out. Close Outlook before backing up."
+note_de = "Archive und Postfächer in PST-Dateien. OST-Dateien sind nur eine Kopie des Kontos und werden ausgelassen. Outlook vor dem Sichern schließen."
+windows = ['{DOCUMENTS}\Outlook Files', '{DOCUMENTS}\Outlook-Dateien']
+exclude = ["*.ost"]
+sensitive = true
+
+[[app]]
+id = "outlook-signatures"
+name = "Outlook signatures"
+name_de = "Outlook-Signaturen"
+category = "email"
+windows = ['{APPDATA}\Microsoft\Signatures']
+
+# ---------------------------------------------------------------- documents
+
+[[app]]
+id = "sticky-notes"
+name = "Sticky Notes"
+name_de = "Kurznotizen"
+category = "documents"
+note_en = "The notes database of Windows Sticky Notes."
+note_de = "Die Notizdatenbank der Windows-Kurznotizen."
+windows = ['{LOCALAPPDATA}\Packages\Microsoft.MicrosoftStickyNotes_8wekyb3d8bbwe\LocalState']
+
+[[app]]
+id = "zotero"
+name = "Zotero"
+category = "documents"
+note_en = "The library: references, notes and attached PDFs."
+note_de = "Die Bibliothek: Literaturangaben, Notizen und angehängte PDFs."
+windows = ['{USERPROFILE}\Zotero']
+linux = ['{HOME}/Zotero']
+exclude = ["*.bak", "locate", "styles/*.tmp"]
+
+[[app]]
+id = "calibre"
+name = "Calibre library"
+name_de = "Calibre-Bibliothek"
+category = "documents"
+windows = ['{USERPROFILE}\Calibre Library', '{DOCUMENTS}\Calibre Library']
+linux = ['{HOME}/Calibre Library']
+
+# ---------------------------------------------------------------- development
+
+[[app]]
+id = "ssh"
+name = "SSH keys"
+name_de = "SSH-Schlüssel"
+category = "development"
+note_en = "Private keys give access to servers. Please encrypt this folder."
+note_de = "Private Schlüssel gewähren Zugang zu Servern. Diesen Ordner bitte verschlüsseln."
+windows = ['{USERPROFILE}\.ssh']
+linux = ['{HOME}/.ssh']
+sensitive = true
+
+[[app]]
+id = "gnupg"
+name = "GnuPG keys"
+name_de = "GnuPG-Schlüssel"
+category = "development"
+note_en = "Private keys for signing and encryption. Please encrypt this folder."
+note_de = "Private Schlüssel zum Signieren und Verschlüsseln. Diesen Ordner bitte verschlüsseln."
+windows = ['{APPDATA}\gnupg']
+linux = ['{HOME}/.gnupg']
+exclude = ["S.*", "*.lock", "random_seed"]
+sensitive = true
+
+[[app]]
+id = "vscode"
+name = "Visual Studio Code"
+category = "development"
+note_en = "User settings, key bindings and snippets."
+note_de = "Benutzereinstellungen, Tastenbelegung und Snippets."
+windows = ['{APPDATA}\Code\User']
+linux = ['{CONFIG}/Code/User']
+exclude = ["workspaceStorage", "History", "globalStorage", "*.log"]
+
+[[app]]
+id = "jetbrains"
+name = "JetBrains IDEs"
+category = "development"
+note_en = "Settings of IntelliJ IDEA, PyCharm, Rider, WebStorm and the other JetBrains IDEs."
+note_de = "Einstellungen von IntelliJ IDEA, PyCharm, Rider, WebStorm und den anderen JetBrains-IDEs."
+windows = ['{APPDATA}\JetBrains']
+linux = ['{CONFIG}/JetBrains']
+exclude = ["log", "tmp", "caches", "index"]
+
+# ---------------------------------------------------------------- gaming
+
+[[app]]
+id = "saved-games"
+name = "Saved games"
+name_de = "Gespeicherte Spiele"
+category = "gaming"
+note_en = "The Windows “Saved Games” folder, which many games use."
+note_de = "Der Windows-Ordner „Gespeicherte Spiele“, den viele Spiele nutzen."
+windows = ['{SAVEDGAMES}']
+
+[[app]]
+id = "my-games"
+name = "My Games"
+category = "gaming"
+note_en = "Save games and settings of games that use Documents\\My Games."
+note_de = "Spielstände und Einstellungen von Spielen, die Dokumente\\My Games nutzen."
+windows = ['{DOCUMENTS}\My Games']
+
+[[app]]
+id = "steam-userdata"
+name = "Steam save games"
+name_de = "Steam-Spielstände"
+category = "gaming"
+note_en = "Local save games and settings per Steam account (userdata). Games themselves are downloaded again."
+note_de = "Lokale Spielstände und Einstellungen je Steam-Konto (userdata). Die Spiele selbst werden neu heruntergeladen."
+windows = ['{PROGRAMFILESX86}\Steam\userdata']
+linux = ['{DATA}/Steam/userdata', '{HOME}/.steam/steam/userdata']
+
+[[app]]
+id = "minecraft"
+name = "Minecraft worlds"
+name_de = "Minecraft-Welten"
+category = "gaming"
+note_en = "Worlds of Minecraft Java Edition."
+note_de = "Welten von Minecraft Java Edition."
+windows = ['{APPDATA}\.minecraft\saves']
+linux = ['{HOME}/.minecraft/saves']
+
+# ---------------------------------------------------------------- media
+
+[[app]]
+id = "obs"
+name = "OBS Studio scenes"
+name_de = "OBS-Studio-Szenen"
+category = "media"
+note_en = "Scene collections and profiles."
+note_de = "Szenensammlungen und Profile."
+windows = ['{APPDATA}\obs-studio\basic']
+linux = ['{CONFIG}/obs-studio/basic']

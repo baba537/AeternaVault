@@ -1,0 +1,6 @@
+# Always build with the current stable Rust. Remove this file to use whatever
+# toolchain is installed locally.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

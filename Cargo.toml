@@ -1,0 +1,175 @@
+[package]
+name = "aeterna-vault"
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Backups of folders as plain, browsable folders, optionally encrypted. Windows and Linux, window and command line."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baba537/AeternaVault"
+readme = "README.md"
+keywords = ["backup", "restore", "encryption", "egui", "cli"]
+categories = ["filesystem", "command-line-utilities", "gui"]
+publish = false
+build = "build.rs"
+
+[lib]
+name = "aeterna_vault"
+path = "src/lib.rs"
+
+# The window. Without the `gui` feature only the command line is built.
+[[bin]]
+name = "aeternavault"
+path = "src/main.rs"
+required-features = ["gui"]
+
+# The command line (also works on computers without a desktop).
+[[bin]]
+name = "aeternavault-cli"
+path = "src/bin/aeternavault-cli.rs"
+
+[features]
+# `wgpu` draws through Direct3D 12 (Windows) or Vulkan (Linux); `glow`
+# (OpenGL) is the fallback and the choice for "compatibility graphics".
+# Command line only (for servers):
+#   cargo build --release --no-default-features --bin aeternavault-cli
+default = ["wgpu", "glow"]
+gui = ["dep:eframe", "dep:rfd"]
+wgpu = ["gui", "eframe/wgpu"]
+glow = ["gui", "eframe/glow"]
+
+[dependencies]
+# GUI: immediate-mode, small, easy to theme. See docs/ARCHITECTURE.md for alternatives.
+eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts", "links", "x11", "wayland"], optional = true }
+# Native file and folder dialogs (Windows dialogs; XDG portal on Linux).
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"], optional = true }
+
+# Configuration and backup index.
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1.6"
+directories = "6.0.0"
+
+# Logging.
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+tracing-appender = "0.2.5"
+
+# Errors.
+thiserror = "2.0.20"
+anyhow = "1.0.104"
+
+# Backup engine.
+walkdir = "2.5.0"
+globset = "0.4.20"
+sha2 = "0.11.0"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
+
+# Command line.
+clap = { version = "4.6.6", features = ["derive"] }
+sys-locale = "0.3.2"
+
+# Encryption (RustCrypto): Argon2id for passphrases, XChaCha20-Poly1305 for data.
+chacha20poly1305 = "0.11.0"
+# Optional second cipher, chosen when a vault is created.
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc"] }
+argon2 = "0.6.0"
+hmac = "0.13.0"
+getrandom = "0.4.3"
+zeroize = "1.9.0"
+# Passphrase strength (pattern, dictionary and repetition aware).
+zxcvbn = { version = "3.1", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Power",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+winreg = "0.56.0"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.31"
+
+[dev-dependencies]
+# Interface tests; `wgpu` renders the README screenshots (see gui/tests.rs).
+egui_kittest = { version = "0.36.2", features = ["eframe", "wgpu"] }
+tempfile = "3.27.0"
+
+# Key derivation is deliberately expensive; keep it fast in debug builds and tests.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+[profile.dev.package.chacha20]
+opt-level = 3
+
+[profile.dev.package.aes]
+opt-level = 3
+
+[profile.dev.package.aes-gcm]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+# Panics are intentionally *not* set to abort: a panic inside a background
+# worker is caught by the GUI and reported instead of closing the window.
+
+# Linux packages (cargo deb): `aeternavault` with the window, and
+# `aeternavault-cli` for computers without a desktop:
+#   cargo deb
+#   cargo deb --variant cli
+[package.metadata.deb]
+name = "aeternavault"
+maintainer = "AeternaVault contributors"
+copyright = "AeternaVault contributors"
+license-file = ["LICENSE-MIT", "0"]
+section = "utils"
+priority = "optional"
+extended-description = "Backs up folders as plain, browsable folders, optionally encrypted. Window and command line."
+# The window loads these at run time (X11 or Wayland, OpenGL or Vulkan).
+depends = "$auto, libxkbcommon0, libxkbcommon-x11-0, libx11-6, libxcursor1, libxrandr2, libxi6, libwayland-client0, libgl1, libegl1"
+recommends = "libvulkan1, xdg-desktop-portal"
+conflicts = "aeternavault-cli"
+replaces = "aeternavault-cli"
+assets = [
+    ["target/release/aeternavault", "usr/bin/", "755"],
+    ["target/release/aeternavault-cli", "usr/bin/", "755"],
+    ["installer/linux/aeternavault.desktop", "usr/share/applications/", "644"],
+    ["assets/icon/aeternavault-256.png", "usr/share/icons/hicolor/256x256/apps/aeternavault.png", "644"],
+    ["assets/icon/aeternavault-512.png", "usr/share/icons/hicolor/512x512/apps/aeternavault.png", "644"],
+    ["powershell/AeternaVault/*", "usr/share/aeternavault/powershell/AeternaVault/", "644"],
+    ["docs/ENCRYPTION.md", "usr/share/doc/aeternavault/", "644"],
+    ["tools/aeterna-decrypt.py", "usr/share/aeternavault/tools/", "644"],
+]
+
+[package.metadata.deb.variants.cli]
+name = "aeternavault-cli"
+default-features = false
+depends = "$auto"
+recommends = ""
+conflicts = "aeternavault"
+replaces = "aeternavault"
+assets = [
+    ["target/release/aeternavault-cli", "usr/bin/", "755"],
+    ["powershell/AeternaVault/*", "usr/share/aeternavault/powershell/AeternaVault/", "644"],
+    ["docs/ENCRYPTION.md", "usr/share/doc/aeternavault-cli/", "644"],
+    ["tools/aeterna-decrypt.py", "usr/share/aeternavault/tools/", "644"],
+]

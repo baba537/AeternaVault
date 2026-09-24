@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # The release workflow builds and tests through this workflow.
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_call' && !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # rustup is preinstalled; rust-toolchain.toml selects stable.
+      - name: Install Rust
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: |
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo clippy --all-targets --locked --no-default-features -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked
+
+      - name: Release build
+        run: cargo build --release --locked
+
+      - name: PowerShell module (Windows PowerShell 5.1 and PowerShell 7)
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File powershell\tests\smoke.ps1 -Cli target\release\aeternavault-cli.exe
+          if ($LASTEXITCODE -ne 0) { throw "Windows PowerShell smoke test failed" }
+          pwsh -NoProfile -File powershell\tests\smoke.ps1 -Cli target\release\aeternavault-cli.exe
+          if ($LASTEXITCODE -ne 0) { throw "PowerShell 7 smoke test failed" }
+
+      - name: Install Inno Setup
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+          }
+
+      - name: Package
+        run: installer\windows\package.ps1
+
+      # Install the previous release, update to this build, uninstall.
+      - name: Installer test
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          New-Item -ItemType Directory -Force previous | Out-Null
+          gh release download --repo ${{ github.repository }} --pattern '*-setup-x64.exe' --dir previous 2>$null
+          $global:LASTEXITCODE = 0
+          $previous = Get-ChildItem previous -Filter *-setup-x64.exe | Select-Object -First 1
+          $setup = Get-ChildItem dist -Filter *-setup-x64.exe | Select-Object -First 1
+          if ($previous) {
+            installer\windows\test-installer.ps1 -Setup $setup.FullName -Previous $previous.FullName
+          } else {
+            Write-Host 'No earlier release with an installer: testing a fresh installation.'
+            installer\windows\test-installer.ps1 -Setup $setup.FullName
+          }
+
+      - name: Install cargo-cyclonedx
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-cyclonedx
+
+      # Software bill of materials: every crate that went into the programs.
+      - name: SBOM
+        run: |
+          cargo cyclonedx --format json
+          $bom = Get-ChildItem -Filter *.cdx.json | Select-Object -First 1
+          if (-not $bom) { throw "no SBOM was written" }
+          Copy-Item $bom.FullName dist\sbom.cdx.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+          retention-days: 14
+
+  linux:
+    name: Linux
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libxkbcommon-dev libwayland-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev
+
+      - name: Install Rust
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: |
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo clippy --all-targets --locked --no-default-features -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked
+
+      - name: PowerShell module (PowerShell 7)
+        run: |
+          cargo build --locked --no-default-features --bin aeternavault-cli
+          pwsh -NoProfile -File powershell/tests/smoke.ps1 -Cli target/debug/aeternavault-cli
+
+      - name: Install cargo-deb
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+
+      - name: Package
+        run: sh installer/linux/package.sh
+
+      - name: Package test
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p previous
+          gh release download --repo ${{ github.repository }} --pattern 'aeternavault_*_amd64.deb' --dir previous 2>/dev/null || true
+          previous=$(ls previous/*.deb 2>/dev/null | head -n 1 || true)
+          sh installer/linux/test-packages.sh $previous
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*
+          retention-days: 14

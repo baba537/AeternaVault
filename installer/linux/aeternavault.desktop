@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=AeternaVault
+GenericName=Backup
+GenericName[de]=Datensicherung
+Comment=Back up folders as plain folders, optionally encrypted
+Comment[de]=Ordner als normale Ordner sichern, auf Wunsch verschlüsselt
+Exec=aeternavault
+Icon=aeternavault
+Terminal=false
+Categories=Utility;Archiving;
+Keywords=backup;restore;encryption;
+StartupWMClass=aeternavault

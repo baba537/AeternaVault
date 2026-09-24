@@ -1,0 +1,78 @@
+name: Release
+
+# Push a tag such as `v0.5.0` to build, test and publish a GitHub release:
+#   git tag v0.5.0
+#   git push origin v0.5.0
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+  # Signed build provenance (verify with `gh attestation verify`).
+  id-token: write
+  attestations: write
+
+jobs:
+  version:
+    name: Tag matches Cargo.toml
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          [ "${GITHUB_REF_NAME}" = "v$version" ] || { echo "Tag ${GITHUB_REF_NAME} does not match $version"; exit 1; }
+
+  # Builds, tests (including install, update and uninstall) and packages.
+  build:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum -- * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Build provenance attestation
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: |
+            dist/*.exe
+            dist/*.zip
+            dist/*.deb
+            dist/*.tar.gz
+
+      # Only the section of this version, without link definitions.
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on && !/^\[[^]]+\]: / { print }
+          ' CHANGELOG.md | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' > release-notes.md
+          {
+            echo
+            echo "**Verify a download:** compare its SHA-256 with \`SHA256SUMS.txt\`, or run \`gh attestation verify <file> --repo ${GITHUB_REPOSITORY}\`."
+          } >> release-notes.md
+          cat release-notes.md
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "AeternaVault $GITHUB_REF_NAME" --notes-file release-notes.md --verify-tag
