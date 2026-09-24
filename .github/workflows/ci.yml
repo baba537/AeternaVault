@@ -39,7 +39,8 @@ jobs:
           cargo clippy --all-targets --locked --no-default-features -- -D warnings
 
       - name: Tests
-        run: cargo test --locked
+        shell: bash
+        run: sh .github/test-summary.sh
 
       - name: Release build
         run: cargo build --release --locked
@@ -119,7 +120,7 @@ jobs:
           cargo clippy --all-targets --locked --no-default-features -- -D warnings
 
       - name: Tests
-        run: cargo test --locked
+        run: sh .github/test-summary.sh
 
       - name: PowerShell module (PowerShell 7)
         run: |
