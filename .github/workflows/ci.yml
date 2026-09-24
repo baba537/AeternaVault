@@ -22,7 +22,7 @@ jobs:
     name: Windows
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # rustup is preinstalled; rust-toolchain.toml selects stable.
       - name: Install Rust
@@ -100,7 +100,7 @@ jobs:
     name: Linux
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Build dependencies
         run: |
