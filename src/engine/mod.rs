@@ -169,6 +169,16 @@ pub fn safe_relative_path(stored: &str) -> Option<PathBuf> {
         if part.is_empty() || part == "." {
             continue;
         }
+        // A drive letter is rejected on every system, so an index is judged
+        // the same way on Windows and Linux.
+        let bytes = part.as_bytes();
+        if out.as_os_str().is_empty()
+            && bytes.len() == 2
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+        {
+            return None;
+        }
         let candidate = Path::new(part);
         let mut components = candidate.components();
         match (components.next(), components.next()) {
