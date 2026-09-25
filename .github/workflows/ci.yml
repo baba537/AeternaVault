@@ -91,7 +91,7 @@ jobs:
           if (-not $bom) { throw "no SBOM was written" }
           Copy-Item $bom.FullName dist\sbom.cdx.json
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: dist/*
@@ -144,7 +144,7 @@ jobs:
           previous=$(ls previous/*.deb 2>/dev/null | head -n 1 || true)
           sh installer/linux/test-packages.sh $previous
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux
           path: dist/*
