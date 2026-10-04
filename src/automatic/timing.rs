@@ -109,7 +109,11 @@ pub fn is_due(
     {
         let retryable = matches!(
             state.last_run.as_ref().map(|r| r.outcome),
-            Some(AutomaticOutcome::DestinationUnavailable | AutomaticOutcome::AlreadyRunning)
+            Some(
+                AutomaticOutcome::DestinationUnavailable
+                    | AutomaticOutcome::AlreadyRunning
+                    | AutomaticOutcome::Interrupted
+            )
         );
         return schedule.catch_up && retryable && now - attempt >= RETRY_AFTER;
     }
@@ -258,6 +262,16 @@ mod tests {
             morning + Duration::minutes(5),
             morning
         ));
+        assert!(is_due(
+            &schedule,
+            &ran,
+            morning + Duration::minutes(20),
+            morning
+        ));
+        // An interrupted backup is made up the same way.
+        if let Some(run) = &mut ran.last_run {
+            run.outcome = AutomaticOutcome::Interrupted;
+        }
         assert!(is_due(
             &schedule,
             &ran,

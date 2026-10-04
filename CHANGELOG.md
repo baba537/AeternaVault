@@ -2,6 +2,22 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- A note when the destination is on the same drive as folders that are backed up (window and `aeternavault-cli status`).
+
+### Fixed
+
+- Checking an encrypted backup with the remembered key showed the names of damaged or missing files, in the window, the command line and the log. Names now appear only after entering the passphrase; otherwise files are counted.
+- In partly encrypted backups, warnings about encrypted files were also stored in the readable index.
+- An interrupted automatic backup counted as completed and was not made up. It is now retried like a backup whose drive was not connected.
+- A backup lock left by a crashed process blocked the destination for up to 12 hours, and a backup running longer than 12 hours could be joined by a second one. Locks of this computer now end with their process.
+- Entries of a damaged backup index were skipped silently during a restore; they are now reported as failed.
+- The PowerShell module sent passphrases in the console code page; passphrases with umlauts did not match when typed later.
+- `--passphrase-stdin` is now used even when a key is remembered.
+
 ## [0.5.0] - 2026-09-24
 
 ### Added

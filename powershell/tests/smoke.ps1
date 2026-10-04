@@ -63,7 +63,9 @@ try {
     Assert $failed 'errors become PowerShell errors'
 
     # Encryption: reading needs the passphrase even with a remembered key.
-    $pass = ConvertTo-SecureString 'correct horse battery staple' -AsPlainText -Force
+    # Umlauts and the euro sign must arrive as UTF-8, the same as when typed in.
+    $plainPass = "Gr$([char]0xFC)$([char]0xDF)e aus K$([char]0xF6)ln f$([char]0xFC)r 5 $([char]0x20AC)"
+    $pass = ConvertTo-SecureString $plainPass -AsPlainText -Force
     $setup = Initialize-AVEncryption -Passphrase $pass -Remember -Confirm:$false
     Assert ($setup.recovery_key.Length -gt 20) 'Initialize-AVEncryption returns the recovery key'
     Start-AVBackup | Out-Null
@@ -71,6 +73,9 @@ try {
     try { Get-AVFile latest | Out-Null } catch { $denied = $true }
     Assert $denied 'encrypted files are not listed without the passphrase'
     Assert (@(Get-AVFile latest -Passphrase $pass).Count -eq 2) 'Get-AVFile -Passphrase'
+    $env:AETERNAVAULT_PASSPHRASE = $plainPass
+    try { Assert (@(Get-AVFile latest).Count -eq 2) 'passphrase with umlauts matches the environment variable' }
+    finally { Remove-Item Env:AETERNAVAULT_PASSPHRASE }
     $recovery = ConvertTo-SecureString $setup.recovery_key -AsPlainText -Force
     Test-AVRecoveryKey -RecoveryKey $recovery | Out-Null
     Write-Host 'ok  Test-AVRecoveryKey'

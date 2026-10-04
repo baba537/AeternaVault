@@ -237,6 +237,29 @@ fn encrypted_backups_need_the_passphrase_to_read() {
         fs::read_to_string(target.join("Data/Taxes/receipt.txt")).unwrap(),
         "42 EUR"
     );
+
+    // A damaged backup checked with the remembered key: problems are reported
+    // without the names of the encrypted files.
+    let blob = all_files(&env.path("dest"))
+        .into_iter()
+        .find(|f| f.extension().is_some_and(|e| e == "avb"))
+        .unwrap();
+    fs::remove_file(blob).unwrap();
+    let check = env.run(&["--json", "verify", "latest"]);
+    assert_eq!(check.status.code(), Some(2));
+    let text = String::from_utf8_lossy(&check.stdout);
+    assert!(text.contains("encrypted file"), "{text}");
+    assert!(
+        !text.contains("letter") && !text.contains("receipt"),
+        "{text}"
+    );
+    // With the passphrase, the names are shown.
+    let named = env.run_with_secret(&["--json", "verify", "latest"], passphrase);
+    let text = String::from_utf8_lossy(&named.stdout);
+    assert!(
+        text.contains("letter") || text.contains("receipt"),
+        "{text}"
+    );
 }
 
 #[test]

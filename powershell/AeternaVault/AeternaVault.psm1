@@ -71,10 +71,22 @@ function Invoke-AVCli {
     $stdout = $process.StandardOutput.ReadToEndAsync()
     $stderr = $process.StandardError.ReadToEndAsync()
     if ($Secret) {
+        # Written as UTF-8 bytes: Windows PowerShell would otherwise use the
+        # console code page, and a passphrase with umlauts would not match.
+        $utf8 = New-Object System.Text.UTF8Encoding($false)
+        $stream = $process.StandardInput.BaseStream
         foreach ($item in $Secret) {
             $plain = ConvertTo-AVPlainText $item
-            try { $process.StandardInput.WriteLine($plain) } finally { $plain = $null }
+            try {
+                $bytes = $utf8.GetBytes($plain + "`n")
+                $stream.Write($bytes, 0, $bytes.Length)
+            }
+            finally {
+                if ($bytes) { [Array]::Clear($bytes, 0, $bytes.Length) }
+                $plain = $null
+            }
         }
+        $stream.Flush()
     }
     $process.StandardInput.Close()
     $process.WaitForExit()

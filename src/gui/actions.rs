@@ -256,6 +256,17 @@ impl AeternaApp {
         }
     }
 
+    /// Whether the destination is on the same drive as a ticked folder: such
+    /// a backup does not survive a failing drive.
+    pub fn destination_shares_drive(&self) -> bool {
+        let destination = &self.config.destination;
+        !destination.as_os_str().is_empty()
+            && self
+                .config
+                .enabled_sources()
+                .any(|s| crate::platform::same_drive(destination, &s.path))
+    }
+
     pub fn selected_snapshot(&self) -> Option<&SnapshotInfo> {
         let selected = self.restore.selected.as_ref()?;
         match &self.snapshots {

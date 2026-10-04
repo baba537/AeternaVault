@@ -296,3 +296,28 @@ fn dpapi(data: &[u8], protect: bool) -> io::Result<Vec<u8>> {
         Ok(result)
     }
 }
+
+/// Whether a process with this id runs. `None` if that cannot be told.
+pub fn process_running(pid: u32) -> Option<bool> {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, GetLastError, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: plain process query; the handle is closed before returning.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return match GetLastError() {
+                ERROR_INVALID_PARAMETER => Some(false),
+                ERROR_ACCESS_DENIED => Some(true),
+                _ => None,
+            };
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code) != 0;
+        CloseHandle(handle);
+        ok.then_some(code == STILL_ACTIVE as u32)
+    }
+}

@@ -470,6 +470,9 @@ struct Ctx {
     secret_stdin: bool,
     stdin_lines: Option<VecDeque<String>>,
     computer: String,
+    /// The passphrase or recovery key was entered in this call (not the
+    /// remembered key): names of encrypted files may be shown.
+    key_typed: bool,
 }
 
 pub fn main() -> ExitCode {
@@ -488,6 +491,7 @@ pub fn main() -> ExitCode {
         json: cli.json,
         secret_stdin: cli.passphrase_stdin,
         stdin_lines: None,
+        key_typed: false,
         computer: platform::computer_name(),
     };
     match run(cli.command, &mut ctx) {
@@ -629,7 +633,10 @@ impl Ctx {
                 );
             };
             match vault::unlock(destination, &secret) {
-                Ok((_, key)) => return Ok(Some(key)),
+                Ok((_, key)) => {
+                    self.key_typed = true;
+                    return Ok(Some(key));
+                }
                 Err(err) if attempts > 1 => eprintln!("{err}"),
                 Err(err) => return Err(err.into()),
             }
@@ -638,11 +645,15 @@ impl Ctx {
     }
 
     /// The key for backing up, listing and checking: the remembered one if
-    /// there is one, otherwise the passphrase.
+    /// there is one, otherwise the passphrase. A passphrase given with
+    /// `--passphrase-stdin` is used in any case (and allows showing names).
     fn write_key(&mut self, destination: &Path) -> anyhow::Result<Option<VaultKey>> {
         let Ok(header) = vault::read_header(destination) else {
             return Ok(None);
         };
+        if self.secret_stdin {
+            return self.read_key(destination);
+        }
         if let Some(key) = vault::remembered_key(&state::key_dir(&self.paths.config_file), &header)
         {
             return Ok(Some(key));
@@ -731,6 +742,8 @@ struct StatusView {
     destination: PathBuf,
     destination_reachable: bool,
     free_bytes: Option<u64>,
+    /// The destination is on the same drive as a ticked folder.
+    same_drive_as_folders: bool,
     encryption: &'static str,
     vault: bool,
     key_remembered: bool,
@@ -767,6 +780,10 @@ fn status(ctx: &mut Ctx) -> anyhow::Result<Outcome> {
         last_backup: list.first().map(|s| s.id.clone()),
         backups: list.len(),
         background: background_on(),
+        same_drive_as_folders: ctx
+            .config
+            .enabled_sources()
+            .any(|s| platform::same_drive(&destination, &s.path)),
     };
     ctx.print(&view, || {
         let mut out = String::new();
@@ -780,6 +797,11 @@ fn status(ctx: &mut Ctx) -> anyhow::Result<Outcome> {
                 _ => String::new(),
             }
         );
+        if view.same_drive_as_folders {
+            out += "              Note: on the same drive as folders that are backed up;
+              a failing drive would take the backups with it.
+";
+        }
         out += &format!(
             "Encryption:   {}{}\n",
             view.encryption,
@@ -891,13 +913,16 @@ fn backup(ctx: &mut Ctx, full: bool, job: Option<String>) -> anyhow::Result<Outc
         AutomaticOutcome::DestinationUnavailable => {
             format!("Skipped: the destination is not reachable. {}", run.message)
         }
+        AutomaticOutcome::Interrupted => {
+            "Interrupted: the backup was stopped before it finished.".to_string()
+        }
         _ => String::new(),
     });
     match run.outcome {
         AutomaticOutcome::Complete => Ok(Outcome::Ok),
-        AutomaticOutcome::CompleteWithNotes | AutomaticOutcome::DestinationUnavailable => {
-            Ok(Outcome::Partly)
-        }
+        AutomaticOutcome::CompleteWithNotes
+        | AutomaticOutcome::DestinationUnavailable
+        | AutomaticOutcome::Interrupted => Ok(Outcome::Partly),
         _ => Err(anyhow!("the backup failed: {}", run.message)),
     }
 }
@@ -1242,6 +1267,7 @@ fn verify_backup(ctx: &mut Ctx, wanted: &str, at: &At) -> anyhow::Result<Outcome
     let report = verify::verify(
         &snapshot,
         key.as_ref(),
+        ctx.key_typed,
         &cancel,
         &mut progress_printer(show),
     )?;

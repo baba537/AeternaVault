@@ -39,6 +39,7 @@ impl Outcome {
             A::CompleteWithNotes => Outcome::Notes,
             A::DestinationUnavailable | A::AlreadyRunning => Outcome::Skipped,
             A::NeedsPassphrase => Outcome::NeedsPassphrase,
+            A::Interrupted => Outcome::Cancelled,
             A::Failed => Outcome::Failed,
         }
     }

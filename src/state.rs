@@ -23,6 +23,9 @@ pub enum AutomaticOutcome {
     /// Encrypted backups are on, but the key is not available.
     NeedsPassphrase,
     AlreadyRunning,
+    /// Stopped before it finished (window closed, computer shut down); made
+    /// up later like a skipped run.
+    Interrupted,
     Failed,
 }
 

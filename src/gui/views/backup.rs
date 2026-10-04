@@ -588,6 +588,16 @@ pub fn destination_status(app: &AeternaApp, ui: &mut Ui) {
         }
         None => {}
     }
+    if app.destination_shares_drive() {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(t.destination_same_drive)
+                    .color(p.warning)
+                    .size(13.0),
+            )
+            .wrap(),
+        );
+    }
 }
 
 /// Always-visible bar at the bottom: last backup on the left, actions on the right.

@@ -68,7 +68,18 @@ pub fn run_restore(
             report.cancelled = true;
             break;
         }
+        // An unsafe path or a missing content reference comes only from a
+        // damaged or modified index. Never silently: it counts as failed.
         let (Some(rel), Some(blob)) = (safe_relative_path(&item.rel), item.blob.as_ref()) else {
+            tracing::warn!(
+                "not restored, invalid entry in the backup index: {}",
+                item.rel
+            );
+            report
+                .warnings
+                .push(format!("{}: invalid entry in the backup index", item.rel));
+            report.failed += 1;
+            progress.files_done += 1;
             continue;
         };
         let target = plan.sources[item.source].root.join(rel);
@@ -108,7 +119,9 @@ pub fn run_restore(
                         reporter.maybe(&progress);
                     })
                 }
-                None => continue,
+                None => Err(CopyError::Io(std::io::Error::other(
+                    "invalid entry in the backup index",
+                ))),
             },
             _ => return Err(EngineError::Locked),
         };

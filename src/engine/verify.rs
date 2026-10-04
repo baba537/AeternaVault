@@ -34,9 +34,14 @@ impl VerifyReport {
     }
 }
 
+/// `show_encrypted_names`: whether names of encrypted files may appear in the
+/// report, the progress and the log. Only when the passphrase was entered for
+/// this check; with the key remembered for automatic backups, encrypted files
+/// are reported by number and content id.
 pub fn verify(
     snapshot: &SnapshotInfo,
     key: Option<&VaultKey>,
+    show_encrypted_names: bool,
     cancel: &CancelToken,
     on_progress: &mut dyn FnMut(&Progress),
 ) -> EngineResult<VerifyReport> {
@@ -64,6 +69,7 @@ pub fn verify(
     // Encrypted content is shared between files; each blob is checked once.
     let mut checked_blobs: HashMap<String, bool> = HashMap::new();
 
+    let mut hidden = 0u64;
     for (part, index) in &parts {
         for entry in &index.files {
             if cancel.is_cancelled() {
@@ -71,7 +77,13 @@ pub fn verify(
                 report.duration = started.elapsed();
                 return Ok(report);
             }
-            let label = format!("{}/{}", entry.source, entry.path);
+            let label = if part.is_encrypted() && !show_encrypted_names {
+                hidden += 1;
+                let id: String = entry.blob.chars().take(12).collect();
+                format!("encrypted file {hidden} ({id}…)")
+            } else {
+                format!("{}/{}", entry.source, entry.path)
+            };
             progress.current = label.clone();
             progress.files_done += 1;
             report.files += 1;

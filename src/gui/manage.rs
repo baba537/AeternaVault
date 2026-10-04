@@ -106,12 +106,20 @@ impl AeternaApp {
             return;
         }
         let key = self.vault.key.clone();
+        // Names of encrypted files only after the passphrase was entered.
+        let show_names = self.vault.can_read();
         self.manage.current = Some((snapshot.id.clone(), PathBuf::new()));
         self.task = Some(Task::spawn(
             ctx,
             TaskKind::Verify,
             move |cancel, progress| {
-                TaskOutput::Verify(verify::verify(&snapshot, key.as_ref(), cancel, progress))
+                TaskOutput::Verify(verify::verify(
+                    &snapshot,
+                    key.as_ref(),
+                    show_names,
+                    cancel,
+                    progress,
+                ))
             },
         ));
         self.screen = Screen::Working;

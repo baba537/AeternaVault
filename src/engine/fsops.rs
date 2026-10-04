@@ -258,7 +258,7 @@ pub struct DestinationLock {
 
 impl DestinationLock {
     const FILE: &'static str = ".aeternavault.lock";
-    /// A lock older than this is considered left over from a crash.
+    /// A lock of another computer older than this is considered left over from a crash.
     const STALE_AFTER: Duration = Duration::from_secs(12 * 3600);
 
     pub fn acquire(destination: &Path) -> io::Result<Option<Self>> {
@@ -276,22 +276,38 @@ impl DestinationLock {
                     return Ok(Some(Self { path }));
                 }
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                    let stale = fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .map(|t| {
-                            SystemTime::now().duration_since(t).unwrap_or_default()
-                                > Self::STALE_AFTER
-                        })
-                        .unwrap_or(true);
-                    if !stale {
+                    if !Self::is_stale(&path) {
                         return Ok(None);
                     }
+                    tracing::info!("removing a lock left over from an ended process");
                     let _ = fs::remove_file(&path);
                 }
                 Err(err) => return Err(err),
             }
         }
         Ok(None)
+    }
+}
+
+impl DestinationLock {
+    /// A lock of this computer is stale once its process has ended, however
+    /// long a backup takes. A lock of another computer (shared drive) is
+    /// stale after `STALE_AFTER`.
+    fn is_stale(path: &Path) -> bool {
+        let content = fs::read_to_string(path).unwrap_or_default();
+        let mut fields = content.trim().splitn(2, ' ');
+        let pid = fields.next().and_then(|p| p.parse::<u32>().ok());
+        let computer = fields.next().unwrap_or_default();
+        if let Some(pid) = pid
+            && computer.eq_ignore_ascii_case(&crate::platform::computer_name())
+            && let Some(running) = crate::platform::process_running(pid)
+        {
+            return !running;
+        }
+        fs::metadata(path)
+            .and_then(|m| m.modified())
+            .map(|t| SystemTime::now().duration_since(t).unwrap_or_default() > Self::STALE_AFTER)
+            .unwrap_or(true)
     }
 }
 

@@ -292,6 +292,56 @@ pub fn lock_file(path: &Path) -> Option<std::fs::File> {
     linux::lock_file(path)
 }
 
+/// Whether two paths are on the same drive (Windows: drive letter or network
+/// share; Linux: file system). Paths that do not exist yet are judged by
+/// their nearest existing parent.
+pub fn same_drive(a: &Path, b: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::Component;
+        let prefix = |p: &Path| match p.components().next() {
+            Some(Component::Prefix(prefix)) => {
+                Some(prefix.as_os_str().to_string_lossy().to_lowercase())
+            }
+            _ => None,
+        };
+        matches!((prefix(a), prefix(b)), (Some(x), Some(y)) if x == y)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let device = |p: &Path| {
+            p.ancestors()
+                .find_map(|a| std::fs::metadata(a).ok())
+                .map(|m| m.dev())
+        };
+        matches!((device(a), device(b)), (Some(x), Some(y)) if x == y)
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = (a, b);
+        false
+    }
+}
+
+/// Whether a process with this id runs on this computer. `None` if that
+/// cannot be told (other systems, no permission to ask).
+pub fn process_running(pid: u32) -> Option<bool> {
+    #[cfg(windows)]
+    {
+        windows::process_running(pid)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::process_running(pid)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 pub fn computer_name() -> String {
     if let Ok(name) = std::env::var("COMPUTERNAME") {
         return name;

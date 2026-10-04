@@ -453,13 +453,27 @@ fn delete_verify_and_move_backups() {
     assert!(!first.snapshot_dir.exists());
     let listed = snapshots::list(&config.destination, None).unwrap();
     assert_eq!(listed.len(), 1);
-    let check = verify::verify(&listed[0], None, &CancelToken::default(), &mut quiet()).unwrap();
+    let check = verify::verify(
+        &listed[0],
+        None,
+        true,
+        &CancelToken::default(),
+        &mut quiet(),
+    )
+    .unwrap();
     assert!(check.is_ok(), "{check:?}");
     assert!(second.snapshot_dir.join("Documents/letter.txt").is_file());
 
     // Damage is found without restoring.
     fs::write(second.snapshot_dir.join("Documents/letter.txt"), "tampered").unwrap();
-    let check = verify::verify(&listed[0], None, &CancelToken::default(), &mut quiet()).unwrap();
+    let check = verify::verify(
+        &listed[0],
+        None,
+        true,
+        &CancelToken::default(),
+        &mut quiet(),
+    )
+    .unwrap();
     assert_eq!(check.damaged, vec!["Documents/letter.txt".to_string()]);
     fs::write(
         second.snapshot_dir.join("Documents/letter.txt"),
@@ -506,7 +520,14 @@ fn delete_verify_and_move_backups() {
     manage::transfer(plain, &other, None, &CancelToken::default(), &mut quiet()).unwrap();
     let there = snapshots::list(&other, Some(&key)).unwrap();
     let plain_there = there.iter().find(|s| !s.is_encrypted()).unwrap();
-    let check = verify::verify(plain_there, None, &CancelToken::default(), &mut quiet()).unwrap();
+    let check = verify::verify(
+        plain_there,
+        None,
+        true,
+        &CancelToken::default(),
+        &mut quiet(),
+    )
+    .unwrap();
     assert!(check.is_ok() && check.files == 2, "{check:?}");
     assert!(
         snapshots::list(&config.destination, Some(&key))
@@ -593,4 +614,46 @@ fn folders_under_known_places_are_stored_portably() {
         .find(|s| s.key == "TestApp")
         .unwrap();
     assert_eq!(record.portable.as_deref(), Some(expected.as_str()));
+}
+
+#[test]
+fn destination_lock_blocks_until_its_process_ends() {
+    use super::fsops::DestinationLock;
+    let tmp = tempfile::tempdir().unwrap();
+    let first = DestinationLock::acquire(tmp.path()).unwrap();
+    assert!(first.is_some());
+    // Held by a running process (this one): a second backup must wait.
+    assert!(DestinationLock::acquire(tmp.path()).unwrap().is_none());
+    drop(first);
+
+    // Left over by a process of this computer that has ended: taken over at once.
+    let computer = crate::platform::computer_name();
+    write(
+        &tmp.path().join(".aeternavault.lock"),
+        &format!("99999999 {computer}\n"),
+    );
+    assert!(DestinationLock::acquire(tmp.path()).unwrap().is_some());
+
+    // Held by another computer and recent: still respected.
+    write(&tmp.path().join(".aeternavault.lock"), "1234 OTHER-PC\n");
+    assert!(DestinationLock::acquire(tmp.path()).unwrap().is_none());
+}
+
+#[test]
+fn same_drive_is_recognised() {
+    use crate::platform::same_drive;
+    let tmp = tempfile::tempdir().unwrap();
+    // A destination that does not exist yet is judged by its parent.
+    assert!(same_drive(tmp.path(), &tmp.path().join("not/yet/there")));
+    #[cfg(windows)]
+    {
+        assert!(same_drive(
+            Path::new(r"C:\Users\a"),
+            Path::new(r"c:\Backups")
+        ));
+        assert!(!same_drive(
+            Path::new(r"C:\Users\a"),
+            Path::new(r"E:\Backups")
+        ));
+    }
 }

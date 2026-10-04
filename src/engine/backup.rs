@@ -122,7 +122,12 @@ pub fn run_backup(
         ENCRYPTED
     };
     parts[primary].stats.skipped = plan.summary.count(ItemKind::Skipped);
-    let mut warnings = plan.warnings.clone();
+    // Warnings per part: in a partly encrypted backup, names of encrypted
+    // files must not end up in the readable index. Warnings from scanning
+    // cannot be assigned to a part and go to the encrypted one there.
+    let split_plan = plan.plain_part && plan.encrypted_part;
+    let mut warnings: [Vec<String>; 2] = Default::default();
+    warnings[if split_plan { ENCRYPTED } else { primary }] = plan.warnings.clone();
     let mut cancelled = false;
 
     for item in plan.stored_files() {
@@ -144,7 +149,7 @@ pub fn run_backup(
         let meta = match std::fs::metadata(&read_path) {
             Ok(meta) => meta,
             Err(err) => {
-                warnings.push(format!("{}: {err}", src.display()));
+                warnings[part].push(format!("{}: {err}", src.display()));
                 stats.failed += 1;
                 progress.files_done += 1;
                 continue;
@@ -257,7 +262,7 @@ pub fn run_backup(
             }
             Err(err) => {
                 tracing::warn!("could not back up {}: {err}", src.display());
-                warnings.push(format!("{}: {err}", src.display()));
+                warnings[part].push(format!("{}: {err}", src.display()));
                 parts[part].stats.failed += 1;
             }
         }
@@ -317,7 +322,7 @@ pub fn run_backup(
         let index = FileIndex {
             format: FORMAT_VERSION,
             files: plain_data.entries,
-            warnings: warnings.clone(),
+            warnings: warnings[PLAIN].clone(),
         };
         // The index is written first and the header last: a folder without a
         // header is recognisable as an unfinished backup.
@@ -341,7 +346,7 @@ pub fn run_backup(
             index: FileIndex {
                 format: FORMAT_VERSION,
                 files: encrypted_data.entries,
-                warnings: warnings.clone(),
+                warnings: warnings[ENCRYPTED].clone(),
             },
         })
         .map_err(|e| {
@@ -371,7 +376,7 @@ pub fn run_backup(
         snapshot_dir,
         header,
         encrypted_part,
-        warnings,
+        warnings: warnings.concat(),
         duration: started.elapsed(),
     };
     let total = report.total_stats();

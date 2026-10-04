@@ -175,3 +175,17 @@ pub fn lock_file(path: &Path) -> Option<std::fs::File> {
     let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 };
     locked.then_some(file)
 }
+
+/// Whether a process with this id runs. `None` if that cannot be told.
+pub fn process_running(pid: u32) -> Option<bool> {
+    let pid = libc::pid_t::try_from(pid).ok()?;
+    // SAFETY: signal 0 only checks whether the process exists.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return Some(true);
+    }
+    match io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => Some(false),
+        Some(libc::EPERM) => Some(true),
+        _ => None,
+    }
+}

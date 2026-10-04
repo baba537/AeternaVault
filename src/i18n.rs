@@ -378,6 +378,12 @@ impl Lang {
             (Lang::De, O::DestinationUnavailable) => format!(
                 "Die automatische Sicherung ({when}) wurde übersprungen, weil das Ziel nicht angeschlossen war."
             ),
+            (Lang::En, O::Interrupted) => format!(
+                "The automatic backup ({when}) was interrupted. It is made up automatically."
+            ),
+            (Lang::De, O::Interrupted) => format!(
+                "Die automatische Sicherung ({when}) wurde unterbrochen. Sie wird automatisch nachgeholt."
+            ),
             (Lang::En, O::NeedsPassphrase) => format!(
                 "The automatic backup ({when}) could not run: the passphrase is not remembered on this computer."
             ),
@@ -1151,6 +1157,8 @@ impl Lang {
             (Lang::De, O::NeedsPassphrase) => "Passphrase benötigt",
             (Lang::En, O::AlreadyRunning) => "skipped",
             (Lang::De, O::AlreadyRunning) => "übersprungen",
+            (Lang::En, O::Interrupted) => "interrupted, will be made up",
+            (Lang::De, O::Interrupted) => "unterbrochen, wird nachgeholt",
             (Lang::En, O::Failed) => "not completed",
             (Lang::De, O::Failed) => "nicht abgeschlossen",
         }
@@ -1724,6 +1732,7 @@ pub struct Tr {
     pub systemd_timer_hint: &'static str,
     pub shortcuts_title: &'static str,
     pub shortcuts: &'static [(&'static str, &'static str)],
+    pub destination_same_drive: &'static str,
 }
 
 pub static EN: Tr = Tr {
@@ -2127,6 +2136,7 @@ pub static EN: Tr = Tr {
         ("Tab / Space", "Move between controls / press"),
         ("Middle click", "Scroll by moving the mouse"),
     ],
+    destination_same_drive: "This folder is on the same drive as folders you back up. If that drive fails, the backups are lost with it; an external drive or a second disk is safer.",
 };
 
 pub static DE: Tr = Tr {
@@ -2530,6 +2540,7 @@ pub static DE: Tr = Tr {
         ("Tab / Leertaste", "Zwischen Elementen wechseln / auslösen"),
         ("Mittelklick", "Durch Bewegen der Maus scrollen"),
     ],
+    destination_same_drive: "Dieser Ordner liegt auf demselben Laufwerk wie zu sichernde Ordner. Fällt das Laufwerk aus, sind auch die Sicherungen verloren; sicherer ist ein externes Laufwerk oder eine zweite Festplatte.",
 };
 
 #[cfg(test)]

@@ -96,6 +96,20 @@ pub fn run_unattended(
     };
 
     match backup::run_backup(&plan, key.as_ref(), &LiveFiles, cancel, on_progress) {
+        Ok(report) if report.header.status == SnapshotStatus::Cancelled => {
+            // Not a success: the job is made up later, and old backups stay.
+            tracing::info!("automatic backup interrupted");
+            let total = report.total_stats();
+            (
+                finished(
+                    AutomaticOutcome::Interrupted,
+                    String::new(),
+                    total.files,
+                    total.bytes,
+                ),
+                Some(report),
+            )
+        }
         Ok(report) => {
             let outcome = if report.header.status == SnapshotStatus::Complete {
                 AutomaticOutcome::Complete
@@ -434,8 +448,9 @@ fn check_backup(
         return;
     };
     let computer = platform::computer_name();
-    let result = crate::engine::snapshots::find(&config.destination, &id, &computer, key)
-        .and_then(|snapshot| crate::engine::verify::verify(&snapshot, key, cancel, &mut |_| {}));
+    let result = crate::engine::snapshots::find(&config.destination, &id, &computer, key).and_then(
+        |snapshot| crate::engine::verify::verify(&snapshot, key, false, cancel, &mut |_| {}),
+    );
     match result {
         Ok(check) if !check.cancelled => {
             tracing::info!(
